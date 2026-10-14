@@ -649,7 +649,91 @@ function createGeometricFacetGem(): string {
   return canvas.toDataURL('image/png');
 }
 
+
+/**
+ * Contoh utama 016: ilustrasi diskon berlatar PUTIH dengan gradasi linear & radial,
+ * bayangan lembut, dan teks/area putih di dalam objek (uji pemilih area putih).
+ */
+function createGradientSaleSample(): string {
+  const canvas = document.createElement('canvas');
+  canvas.width = 640;
+  canvas.height = 480;
+  const ctx = canvas.getContext('2d')!;
+  ctx.fillStyle = '#FFFFFF';
+  ctx.fillRect(0, 0, 640, 480);
+
+  // Bayangan lembut di bawah kupon & kado
+  ctx.save();
+  ctx.filter = 'blur(14px)';
+  ctx.fillStyle = 'rgba(90, 90, 90, 0.45)';
+  ctx.beginPath();
+  ctx.ellipse(205, 420, 150, 22, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.ellipse(500, 432, 95, 16, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+
+  // Kupon: gradasi linear oranye → magenta, sudut membulat
+  const coupon = ctx.createLinearGradient(70, 120, 340, 380);
+  coupon.addColorStop(0, '#FFA41B');
+  coupon.addColorStop(1, '#E3157F');
+  ctx.fillStyle = coupon;
+  ctx.beginPath();
+  ctx.roundRect(70, 110, 270, 290, 28);
+  ctx.fill();
+  // lubang kupon (putih di dalam objek)
+  ctx.fillStyle = '#FFFFFF';
+  ctx.beginPath();
+  ctx.arc(205, 150, 14, 0, Math.PI * 2);
+  ctx.fill();
+  // teks putih
+  ctx.fillStyle = '#FFFFFF';
+  ctx.font = 'bold 76px Arial, Helvetica, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('50%', 205, 280);
+  ctx.font = 'bold 44px Arial, Helvetica, sans-serif';
+  ctx.fillText('OFF', 205, 335);
+
+  // Balon: gradasi radial dengan sorotan
+  const balloon = ctx.createRadialGradient(455, 120, 8, 480, 150, 95);
+  balloon.addColorStop(0, '#8FD3FF');
+  balloon.addColorStop(1, '#1D3C8F');
+  ctx.fillStyle = balloon;
+  ctx.beginPath();
+  ctx.ellipse(480, 150, 78, 92, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = '#C9A44C';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(480, 242);
+  ctx.bezierCurveTo(500, 280, 460, 300, 495, 330);
+  ctx.stroke();
+
+  // Kado hitam dengan pita emas bergradasi
+  ctx.fillStyle = '#17181C';
+  ctx.fillRect(420, 330, 160, 100);
+  const ribbon = ctx.createLinearGradient(420, 0, 580, 0);
+  ribbon.addColorStop(0, '#8C6A22');
+  ribbon.addColorStop(0.5, '#F2D27A');
+  ribbon.addColorStop(1, '#8C6A22');
+  ctx.fillStyle = ribbon;
+  ctx.fillRect(420, 368, 160, 22);
+  ctx.fillRect(488, 330, 24, 100);
+
+  return canvas.toDataURL('image/png');
+}
+
 export const SAMPLE_IMAGES: SampleImage[] = [
+  {
+    id: 'sample-gradient-sale',
+    name: 'gradient_sale_coupon.png',
+    category: 'Gradasi + Bg Putih (Uji Utama 016)',
+    description: 'Kupon gradasi linear, balon gradasi radial, pita emas, bayangan lembut, serta teks & lubang putih di dalam objek.',
+    hasWhiteBg: true,
+    bgType: 'white',
+    getDataUrl: createGradientSaleSample,
+  },
   {
     id: 'sample-mecha-magenta',
     name: 'cyber_mecha_badge.png',

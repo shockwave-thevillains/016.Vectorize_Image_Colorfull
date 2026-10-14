@@ -21,7 +21,7 @@ export const Header: React.FC<HeaderProps> = ({
   onBatchProcess,
   isProcessingBatch,
   onBatchDownload,
-  bgMode = 'magenta',
+  bgMode = 'white',
   removeBgActive = true,
   whiteTransparentActive = false,
   activeCurveMode,
@@ -41,7 +41,7 @@ export const Header: React.FC<HeaderProps> = ({
               <h1 className="text-base sm:text-lg font-bold text-slate-900 tracking-tight flex items-center gap-1.5">
                 <span>Vectorize</span>
                 <span className="text-transparent bg-clip-text bg-gradient-to-r from-indigo-600 via-purple-600 to-pink-600 font-extrabold">
-                  Multi-Color
+                  Colorful
                 </span>
               </h1>
               <span className="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-md bg-indigo-50 text-indigo-700 border border-indigo-200/80">
@@ -124,7 +124,7 @@ export const Header: React.FC<HeaderProps> = ({
               )}
             </div>
             <p className="text-xs text-slate-500 hidden sm:block">
-              Vektorisasi multi-warna presisi tinggi dengan penghapus background Magenta #FF00FF &amp; Putih #FFFFFF
+              Vektor multi-warna + gradient asli, background putih transparan, putih di dalam objek bisa dipilih per area
             </p>
           </div>
         </div>

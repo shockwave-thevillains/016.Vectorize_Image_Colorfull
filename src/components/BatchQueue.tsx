@@ -363,7 +363,7 @@ export const BatchQueue: React.FC<BatchQueueProps> = ({
                     <span className="text-[11px] px-2 py-0.5 rounded-md bg-indigo-50 text-indigo-700 font-bold border border-indigo-100">
                       {item.config.preset}
                     </span>
-                    {item.config.removeBackground !== false && (item.config.bgMode ?? 'magenta') === 'magenta' && (
+                    {item.config.removeBackground !== false && (item.config.bgMode ?? 'white') === 'magenta' && (
                       <span className="text-[10px] px-2 py-0.5 rounded-md bg-pink-50 text-pink-700 font-bold border border-pink-200 flex items-center gap-1">
                         <span className="w-2 h-2 rounded-full bg-[#FF00FF] border border-pink-300 shrink-0" />
                         <span>Magenta Transparan (±{item.config.magentaTolerance ?? 14}%)</span>
@@ -376,6 +376,9 @@ export const BatchQueue: React.FC<BatchQueueProps> = ({
                           {item.config.keepInnerWhite !== false
                             ? 'Putih Transparan (Tengah Aman)'
                             : 'Semua Putih Transparan'}
+                          {(item.config.whiteRegionOverrides?.length ?? 0) > 0 &&
+                            ` · ${item.config.whiteRegionOverrides!.length} area diubah`}
+                          {item.config.removeShadow ? ' · tanpa bayangan' : ''}
                         </span>
                       </span>
                     )}
@@ -383,6 +386,15 @@ export const BatchQueue: React.FC<BatchQueueProps> = ({
                       <span className="text-[10px] px-2 py-0.5 rounded-md bg-amber-50 text-amber-800 font-bold border border-amber-200 flex items-center gap-0.5">
                         <Sparkles className="w-2.5 h-2.5 text-amber-600" />
                         <span>{item.config.upscale}x</span>
+                      </span>
+                    )}
+                    {(item.result?.gradientCount ?? 0) > 0 && (
+                      <span
+                        className="text-[10px] px-2 py-0.5 rounded-md bg-rose-50 text-rose-800 font-bold border border-rose-200"
+                        title="Area yang menjadi gradient vektor asli (linear/radial)"
+                      >
+                        {item.result!.gradientCount} gradien
+                        {(item.result!.gradientFallbackCount ?? 0) > 0 && ` · ${item.result!.gradientFallbackCount} pita`}
                       </span>
                     )}
                     {item.result?.usedFallback && (

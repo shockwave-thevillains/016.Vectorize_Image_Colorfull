@@ -13,6 +13,15 @@ export type WhiteRemovalMode = 'floodfill' | 'global';
 
 export type BackgroundRemovalColor = 'magenta' | 'white';
 
+/** Titik klik pengguna (koordinat ternormalisasi 0..1) yang membalik keputusan satu area putih. */
+export interface WhiteRegionOverride {
+  x: number;
+  y: number;
+  action: 'remove' | 'keep';
+}
+
+export type EpsGradientMode = 'shading' | 'bands';
+
 export type OutputResolutionPreset = 'native' | '15mp' | '20mp' | '25mp' | '30mp' | 'custom';
 
 export interface VectorizeConfig {
@@ -41,6 +50,16 @@ export interface VectorizeConfig {
   whiteTolerance: number; // 180 to 255 (default 242)
   whiteRemovalMode: WhiteRemovalMode;
   transparentColors?: string[]; // Optional specific hex colors to treat as transparent
+  // Area putih per klik (mode Putih): override per area, disimpan per gambar
+  whiteRegionOverrides?: WhiteRegionOverride[];
+  defringeWhite?: boolean; // Bersihkan halo putih di tepi objek (default true)
+  // Bayangan lembut abu-abu di bawah objek
+  removeShadow?: boolean; // default false = bayangan dipertahankan
+  shadowMinLight?: number; // Kecerahan minimum piksel bayangan yang ikut dihapus (0..255, default 170)
+  // Gradasi warna → gradient vektor asli
+  detectGradients?: boolean; // default true
+  gradientTolerance?: number; // RMSE maksimum (0..255) agar model gradien diterima, default 9
+  epsGradientMode?: EpsGradientMode; // 'shading' (Level 3, default) | 'bands' (pita warna, Level 2)
   // Curve fitting & tracing geometry
   curveStyle: 'spline' | 'polygon'; // "Organik" (spline) vs "Geometris" (polygon)
   mode: 'spline' | 'polygon';
@@ -91,6 +110,12 @@ export interface VectorResult {
   mergedColorCount?: number;
   actualUpscaleFactor?: number;
   warnings?: string[];
+  /** Jumlah area yang menjadi gradient vektor asli */
+  gradientCount?: number;
+  /** Jumlah area bergradasi yang tidak cocok model → dipecah menjadi pita warna */
+  gradientFallbackCount?: number;
+  /** Statistik area putih (mode Putih) */
+  whiteRegions?: { removed: number; kept: number; overridden: number };
   /** true bila vtracer gagal dan gambar diproses ImageTracer (fallback) */
   usedFallback?: boolean;
   qualityScore: 'optimal' | 'good' | 'warning';

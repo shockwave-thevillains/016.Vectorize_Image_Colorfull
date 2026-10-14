@@ -64,7 +64,7 @@ ${completedItems
       const num = startNumber + idx;
       const effectiveCode = fileCode || item.config.fileCode;
       const formatted = formatFileName(item.name, num, effectiveCode);
-      return `- ${formatted} (Asal: ${item.name} | ${item.result?.width}x${item.result?.height}px [${item.result?.outputMegaPixels ? `${item.result.outputMegaPixels} MP` : `${(((item.result?.width || 0) * (item.result?.height || 0)) / 1000000).toFixed(1)} MP`}], ${item.result?.colorCount} warna, ${item.result?.pathCount} path kurva, Transparansi: ${item.config.removeBackground !== false ? ((item.config.bgMode ?? 'magenta') === 'magenta' ? 'Magenta Transparan' : 'Putih Transparan') : 'Solid'})`;
+      return `- ${formatted} (Asal: ${item.name} | ${item.result?.width}x${item.result?.height}px [${item.result?.outputMegaPixels ? `${item.result.outputMegaPixels} MP` : `${(((item.result?.width || 0) * (item.result?.height || 0)) / 1000000).toFixed(1)} MP`}], ${item.result?.colorCount} warna, ${item.result?.pathCount} path kurva, Transparansi: ${item.config.removeBackground !== false ? ((item.config.bgMode ?? 'white') === 'magenta' ? 'Magenta Transparan' : 'Putih Transparan') : 'Solid'})`;
     }
   )
   .join('\n')}

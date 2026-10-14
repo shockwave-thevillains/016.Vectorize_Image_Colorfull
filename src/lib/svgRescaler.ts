@@ -1,5 +1,6 @@
 import svgpath from 'svgpath';
 import { convertSvgToEps } from './epsConverter';
+import { scaleGradientTransforms } from './gradientSvg';
 import { OutputResolutionPreset, VectorizeConfig } from '../types';
 
 export interface ScaledResolution {
@@ -150,6 +151,9 @@ export function scaleSvg(svgString: string, targetWidth: number, targetHeight: n
     cleanAttrs = cleanAttrs.replace(/\/+$/, '').trim();
     return `<path ${cleanAttrs}/>`;
   });
+
+  // Gradien (gradientTransform) ikut diskalakan bersama path
+  resultSvg = scaleGradientTransforms(resultSvg, sx, sy);
 
   // Update viewBox
   if (resultSvg.includes('viewBox=')) {

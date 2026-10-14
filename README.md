@@ -1,7 +1,17 @@
-# 014 · Vectorize Image — Magenta Background
+# 016 · Vectorize Image Colorful
 
-Batch converter gambar raster ke vektor multi-warna (**SVG + EPS**) untuk microstock. Background magenta
-`#FF00FF` (atau putih) otomatis dibuat transparan. Output diskalakan ke ≥ 15 MP.
+Batch converter gambar raster ke vektor multi-warna (**SVG + EPS**) untuk microstock — dikembangkan dari
+repo 014, dengan tiga kemampuan baru:
+
+1. **Gradasi warna → gradient vektor asli.** Area bergradasi dideteksi otomatis dan ditulis sebagai
+   `linearGradient` / `radialGradient` (termasuk radial lonjong dan kilau logam simetris gelap-terang-gelap).
+   Bila gradasinya terlalu rumit, area itu otomatis dipecah menjadi **pita warna bertingkat** (cadangan).
+2. **Background putih jadi transparan, putih di dalam objek bisa dipilih per area.** Default: putih yang
+   menyentuh tepi gambar dihapus, putih di dalam objek dipertahankan. Di preview (tab **Area Putih**)
+   setiap area putih bisa **diklik** untuk dihapus ↔ dipertahankan, lalu diproses ulang.
+3. **Bayangan lembut** di bawah objek: default dipertahankan, bisa dihapus bersama background.
+
+Mode background **Magenta #FF00FF** dari 014 tetap tersedia sebagai opsi.
 
 **Berjalan 100% di browser.** Tidak ada server, tidak ada upload: gambar tidak pernah meninggalkan
 komputer pengguna. Karena itu aplikasi ini bisa di-hosting gratis sebagai situs statis di **GitHub Pages**.
@@ -41,20 +51,20 @@ workflow men-deploy ke Pages repo ini sendiri (perilaku default).
    (atau `<akun-lain>.github.io` bila ingin alamat tanpa sub-path).
 2. **Di komputer sendiri:** buat sepasang deploy key (tanpa passphrase):
    ```bash
-   ssh-keygen -t ed25519 -C "deploy-014" -f deploy_014 -N ""
+   ssh-keygen -t ed25519 -C "deploy-016" -f deploy_016 -N ""
    ```
-   Hasilnya `deploy_014` (private) dan `deploy_014.pub` (public).
+   Hasilnya `deploy_016` (private) dan `deploy_016.pub` (public).
 3. **Repo tujuan (akun lain)** → Settings → **Deploy keys** → *Add deploy key* → tempel isi
-   `deploy_014.pub` → centang **Allow write access** → Add.
-4. **Repo ini (014)** → Settings → **Secrets and variables → Actions**:
-   - tab **Secrets** → *New repository secret* → nama `PAGES_DEPLOY_KEY`, isi seluruh `deploy_014`
+   `deploy_016.pub` → centang **Allow write access** → Add.
+4. **Repo ini (016)** → Settings → **Secrets and variables → Actions**:
+   - tab **Secrets** → *New repository secret* → nama `PAGES_DEPLOY_KEY`, isi seluruh `deploy_016`
      (termasuk baris `-----BEGIN…` dan `-----END…`).
    - tab **Variables** → *New repository variable* → nama `PAGES_REPO`, isi `<akun-lain>/<nama-repo>`.
    - (opsional) variable `PAGES_BRANCH` bila tidak ingin memakai branch default `gh-pages`.
-5. **Repo ini (014)** → Actions → **Deploy to GitHub Pages** → *Run workflow*. Branch `gh-pages`
+5. **Repo ini (016)** → Actions → **Deploy to GitHub Pages** → *Run workflow*. Branch `gh-pages`
    otomatis terbentuk di repo tujuan.
 6. **Repo tujuan** → Settings → **Pages** → Source: **Deploy from a branch** → `gh-pages` / `/ (root)` → Save.
-7. Hapus file `deploy_014` dari komputer setelah tersimpan di secret.
+7. Hapus file `deploy_016` dari komputer setelah tersimpan di secret.
 8. (Opsional) Matikan Pages lama di repo ini: Settings → Pages → *Unpublish site*.
 
 ## 2. Menjalankan di komputer sendiri
@@ -82,15 +92,32 @@ npm run build && npm run preview   # versi produksi → http://localhost:3000
 ## Arsitektur singkat
 
 ```
-Browser (main thread)                       Web Worker
-─────────────────────                       ──────────
+Browser (main thread)                                  Web Worker (vtracer WASM)
+─────────────────────                                  ─────────────────────────
 load gambar → upscale (opsional)
-→ color snapping → hapus background
-→ kirim piksel RGBA (transfer, zero-copy) ──▶ vtracer WASM → SVG mentah
-◀────────────────────────────────────────────
-bake transform → buang path background
-→ skala ke ≥15 MP → buat EPS → ZIP
+→ background putih: area putih terhubung (+ klik per area,
+  + bayangan opsional) → transparan, defringe halo putih
+→ deteksi gradasi (segmentasi + fit linear/radial multi-stop)
+    area cocok  → dilubangi dari lapisan datar
+    tidak cocok → dibiarkan (jadi pita warna)
+→ color snapping
+→ lapisan datar (RGBA) ─────────────────────────────▶ SVG warna datar
+→ masker tiap area gradien (hitam-putih) ───────────▶ path outline gradien
+◀────────────────────────────────────────────────────
+susun SVG: <defs> gradien + path gradien (paling bawah) + lapisan datar di atasnya
+→ skala ke ≥15 MP (path + gradientTransform) → EPS → ZIP
 ```
+
+- Path gradien diletakkan **di bawah** lapisan warna datar dan lubang detailnya ditutup, sehingga teks/ikon
+  kecil di atas area gradasi tetap utuh dan tidak ada celah di tepi.
+- Gradien selalu ditulis dalam bentuk kanonik (`gradientUnits="userSpaceOnUse"` + `gradientTransform="matrix(…)"`),
+  sehingga penskalaan cukup mengalikan matriks dan konversi EPS cukup `concat` + shading satuan.
+- **EPS**: pilih di pengaturan *Gradasi Warna → Gradien di EPS*:
+  - **Gradient Asli** (default) — smooth shading PostScript Level 3 (`shfill`, ShadingType 2/3). Halus dan ringan;
+    Illustrator/Inkscape/Ghostscript membacanya sebagai gradien.
+  - **Pita Warna** — gradien ditulis sebagai banyak pita warna solid (PostScript Level 2), untuk software atau
+    validator lama yang tidak mendukung Level 3. File lebih besar.
+  SVG selalu memakai gradient asli.
 
 - Pool berisi 1–3 worker (mengikuti jumlah core CPU); batch memproses **2 gambar bersamaan**, sehingga
   pre-processing gambar berikutnya berjalan sambil vtracer bekerja.
@@ -112,6 +139,14 @@ npm run vendor:vtracer
 ---
 
 ## Catatan pemakaian
+
+- **Toleransi gradasi** (4–20, default 12): makin tinggi, makin banyak area yang dijadikan gradient (lebih halus),
+  tapi detail yang warnanya mirip bisa ikut tergabung. Makin rendah, makin ketat — sisanya jadi pita warna.
+  Antrean menampilkan badge "N gradien · M pita" per gambar.
+- **Area putih**: buka preview → tab **Area Putih** → klik area → *Terapkan & Vektorisasi Ulang*.
+  Pilihan disimpan per gambar (sebagai titik klik), tidak tertimpa saat pengaturan global diubah.
+- **Hapus bayangan lembut**: menghapus abu-abu netral yang menempel ke background. Slider kecerahan
+  mengatur seberapa gelap bayangan yang ikut terhapus; hati-hati dengan bagian abu-abu objek yang menempel latar.
 
 - **Upscale** (`1x / 2x / 4x` di UI): default 4x memperbesar gambar 1024 px ke 2400 px sebelum tracing —
   tepi lebih halus, tapi ~4–6× lebih berat. Uji A/B di zoom 200% sebelum memilih.

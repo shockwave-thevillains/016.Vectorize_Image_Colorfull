@@ -26,7 +26,7 @@ import {
   Maximize2,
   Tag,
 } from 'lucide-react';
-import { PRESETS } from '../lib/vectorizer';
+import { PRESETS, applyPreset } from '../lib/vectorizer';
 import { VectorizeConfig, VectorPresetId, WhiteRemovalMode, OutputResolutionPreset } from '../types';
 import { getOutputDimensionsForConfig, MIN_OUTPUT_MEGAPIXELS } from '../lib/svgRescaler';
 
@@ -77,11 +77,8 @@ export const SettingsBar: React.FC<SettingsBarProps> = ({
   const handlePresetSelect = (presetId: VectorPresetId) => {
     const presetObj = PRESETS.find((p) => p.id === presetId);
     if (presetObj && presetObj.config) {
-      onChange({
-        ...config,
-        ...presetObj.config,
-        preset: presetId,
-      });
+      // Preset hanya mengubah gaya tracing; pilihan background/area putih/bayangan tetap milik pengguna.
+      onChange(applyPreset(config, presetObj));
     }
   };
 
@@ -350,18 +347,18 @@ export const SettingsBar: React.FC<SettingsBarProps> = ({
 
       {/* SECTION 2: Background Transparency Options (Magenta #FF00FF Default & Putih #FFFFFF Cadangan) */}
       <div className={`rounded-xl p-3.5 border transition-all shadow-2xs space-y-3 ${
-        (config.bgMode ?? 'magenta') === 'magenta'
+        (config.bgMode ?? 'white') === 'magenta'
           ? 'bg-gradient-to-r from-pink-50/90 via-fuchsia-50/70 to-purple-50/80 border-pink-200/90'
           : 'bg-gradient-to-r from-emerald-50/90 via-teal-50/70 to-cyan-50/80 border-emerald-200/90'
       }`}>
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
           <div className="flex items-start sm:items-center gap-3">
             <div className={`w-9 h-9 rounded-xl text-white flex items-center justify-center shrink-0 shadow-sm ${
-              (config.bgMode ?? 'magenta') === 'magenta'
+              (config.bgMode ?? 'white') === 'magenta'
                 ? 'bg-gradient-to-tr from-pink-600 to-fuchsia-600 shadow-pink-500/30'
                 : 'bg-emerald-600 shadow-emerald-600/30'
             }`}>
-              {(config.bgMode ?? 'magenta') === 'magenta' ? (
+              {(config.bgMode ?? 'white') === 'magenta' ? (
                 <span className="w-5 h-5 rounded-md bg-[#FF00FF] border-2 border-white/80 shadow-2xs inline-block" />
               ) : (
                 <SunMedium className="w-5 h-5 stroke-[2.2]" />
@@ -374,7 +371,7 @@ export const SettingsBar: React.FC<SettingsBarProps> = ({
                 </h3>
                 <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
                   config.removeBackground !== false
-                    ? (config.bgMode ?? 'magenta') === 'magenta'
+                    ? (config.bgMode ?? 'white') === 'magenta'
                       ? 'bg-pink-100 text-pink-900 border border-pink-300'
                       : 'bg-emerald-200 text-emerald-900 border border-emerald-300'
                     : 'bg-slate-200 text-slate-700'
@@ -382,17 +379,17 @@ export const SettingsBar: React.FC<SettingsBarProps> = ({
                   {config.removeBackground !== false ? 'AKTIF (Transparan)' : 'NON-AKTIF (Solid)'}
                 </span>
                 <span className={`text-[10px] font-bold px-2 py-0.5 rounded-md shadow-2xs ${
-                  (config.bgMode ?? 'magenta') === 'magenta'
+                  (config.bgMode ?? 'white') === 'magenta'
                     ? 'bg-fuchsia-600 text-white'
                     : 'bg-emerald-700 text-white'
                 }`}>
-                  {(config.bgMode ?? 'magenta') === 'magenta' ? 'Mode: Magenta #FF00FF' : 'Mode: Putih #FFFFFF'}
+                  {(config.bgMode ?? 'white') === 'magenta' ? 'Mode: Magenta #FF00FF' : 'Mode: Putih #FFFFFF'}
                 </span>
               </div>
               <p className="text-[11px] text-slate-600 mt-0.5">
-                {(config.bgMode ?? 'magenta') === 'magenta'
+                {(config.bgMode ?? 'white') === 'magenta'
                   ? 'Menghapus background Magenta #FF00FF dengan toleransi warna & defringe tepi. Detail putih di dalam desain 100% aman.'
-                  : 'Mode cadangan: Flood-fill dari tepi luar untuk gambar dengan background putih. Putih di tengah tetap solid.'}
+                  : 'Background putih yang menyentuh tepi gambar dihapus. Putih di dalam objek mengikuti pilihan di bawah — dan bisa diubah per area dengan mengklik area di preview (tab "Area Putih").'}
               </p>
             </div>
           </div>
@@ -406,18 +403,18 @@ export const SettingsBar: React.FC<SettingsBarProps> = ({
                 id="bg-mode-magenta-btn"
                 onClick={() => handleBgModeSelect('magenta')}
                 className={`px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer ${
-                  (config.bgMode ?? 'magenta') === 'magenta'
+                  (config.bgMode ?? 'white') === 'magenta'
                     ? 'bg-fuchsia-600 text-white shadow-xs'
                     : 'text-slate-700 hover:text-slate-900 hover:bg-slate-100'
                 }`}
-                title="Magenta #FF00FF (Default untuk hampir semua gambar)"
+                title="Magenta #FF00FF (untuk gambar yang dibuat dengan latar magenta)"
               >
                 <span className="w-3 h-3 rounded-full bg-[#FF00FF] border border-white/60 inline-block shrink-0" />
                 <span>Magenta</span>
                 <span className={`text-[9px] px-1 py-0.2 rounded font-extrabold ${
-                  (config.bgMode ?? 'magenta') === 'magenta' ? 'bg-white/20 text-white' : 'bg-pink-100 text-pink-800'
+                  (config.bgMode ?? 'white') === 'magenta' ? 'bg-white/20 text-white' : 'bg-pink-100 text-pink-800'
                 }`}>
-                  Default
+                  Opsi
                 </span>
               </button>
 
@@ -430,14 +427,14 @@ export const SettingsBar: React.FC<SettingsBarProps> = ({
                     ? 'bg-emerald-600 text-white shadow-xs'
                     : 'text-slate-700 hover:text-slate-900 hover:bg-slate-100'
                 }`}
-                title="Putih #FFFFFF (Mode cadangan jika desain memuat warna pink/magenta)"
+                title="Putih #FFFFFF (default): background putih dihapus, putih di dalam objek bisa dipilih per area"
               >
                 <span className="w-3 h-3 rounded-full bg-white border border-slate-400 inline-block shrink-0" />
                 <span>Putih</span>
                 <span className={`text-[9px] px-1 py-0.2 rounded font-extrabold ${
                   config.bgMode === 'white' ? 'bg-white/20 text-white' : 'bg-slate-100 text-slate-600'
                 }`}>
-                  Cadangan
+                  Default
                 </span>
               </button>
             </div>
@@ -449,7 +446,7 @@ export const SettingsBar: React.FC<SettingsBarProps> = ({
               onClick={() => handleToggleRemoveBackground(config.removeBackground === false ? true : false)}
               className={`px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer shadow-2xs ${
                 config.removeBackground !== false
-                  ? (config.bgMode ?? 'magenta') === 'magenta'
+                  ? (config.bgMode ?? 'white') === 'magenta'
                     ? 'bg-pink-600 text-white hover:bg-pink-700 shadow-pink-600/20'
                     : 'bg-emerald-600 text-white hover:bg-emerald-700 shadow-emerald-600/20'
                   : 'bg-white text-slate-700 hover:bg-slate-100 border border-slate-300'
@@ -464,7 +461,7 @@ export const SettingsBar: React.FC<SettingsBarProps> = ({
         {/* Detailed Controls: Magenta Mode vs White Mode */}
         {config.removeBackground !== false && (
           <div className="pt-2 border-t border-slate-200/60 flex flex-wrap items-center justify-between gap-3 text-xs">
-            {(config.bgMode ?? 'magenta') === 'magenta' ? (
+            {(config.bgMode ?? 'white') === 'magenta' ? (
               /* MAGENTA CONTROLS */
               <div className="flex flex-wrap items-center gap-3">
                 {/* Magenta Tolerance Slider */}
@@ -532,12 +529,45 @@ export const SettingsBar: React.FC<SettingsBarProps> = ({
                     className="rounded text-emerald-600 focus:ring-emerald-500 w-4 h-4 cursor-pointer"
                   />
                   <span className="flex items-center gap-1">
-                    <span>Putih di Tengah TIDAK Transparan</span>
+                    <span>Pertahankan Putih di Dalam Objek</span>
                     <span className="text-[10px] bg-emerald-100 text-emerald-800 px-1 rounded font-semibold">
-                      Otomatis Aktif
+                      Default · ubah per area di preview
                     </span>
                   </span>
                 </label>
+
+                {/* Bayangan lembut */}
+                <label
+                  id="remove-shadow-label"
+                  className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white border border-slate-300 text-xs font-bold text-slate-800 cursor-pointer shadow-2xs hover:bg-slate-50 transition"
+                  title="Bayangan abu-abu lembut yang menempel ke background ikut dibuat transparan"
+                >
+                  <input
+                    id="setting-remove-shadow"
+                    type="checkbox"
+                    checked={config.removeShadow === true}
+                    onChange={(e) => onChange({ ...config, removeShadow: e.target.checked })}
+                    className="rounded text-slate-700 focus:ring-slate-500 w-4 h-4 cursor-pointer"
+                  />
+                  <span>Hapus Bayangan Lembut</span>
+                </label>
+                {config.removeShadow === true && (
+                  <div className="flex items-center gap-1.5 bg-white/90 border border-slate-200 rounded-lg px-2.5 py-1 text-[11px] text-slate-700 shadow-2xs">
+                    <span className="font-semibold text-slate-600">Bayangan terhapus hingga kecerahan:</span>
+                    <input
+                      id="shadow-light-slider"
+                      type="range"
+                      min="90"
+                      max="235"
+                      step="5"
+                      value={config.shadowMinLight ?? 170}
+                      onChange={(e) => onChange({ ...config, shadowMinLight: parseInt(e.target.value, 10) })}
+                      className="w-20 accent-slate-700 cursor-pointer"
+                      title="Makin kecil = bayangan yang lebih gelap ikut terhapus (hati-hati: bagian abu-abu objek yang menempel latar bisa ikut terhapus)"
+                    />
+                    <span className="font-mono font-bold text-slate-700">{config.shadowMinLight ?? 170}</span>
+                  </div>
+                )}
 
                 {/* White Sensitivity Slider */}
                 <div className="flex items-center gap-1.5 bg-white/90 border border-emerald-200 rounded-lg px-2.5 py-1 text-[11px] text-slate-700 shadow-2xs">
@@ -559,6 +589,91 @@ export const SettingsBar: React.FC<SettingsBarProps> = ({
                 </div>
               </div>
             )}
+          </div>
+        )}
+      </div>
+
+      {/* SECTION: Gradasi Warna → gradient vektor asli */}
+      <div className="bg-gradient-to-r from-orange-50/80 via-rose-50/60 to-violet-50/60 rounded-xl p-3.5 border border-rose-200/80 flex flex-col gap-3 shadow-2xs">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
+          <div className="flex items-start sm:items-center gap-3">
+            <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-orange-500 to-fuchsia-600 text-white flex items-center justify-center shrink-0 shadow-sm">
+              <Sparkles className="w-5 h-5 stroke-[2.2]" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2 flex-wrap">
+                <h3 className="text-xs sm:text-sm font-bold text-slate-900">Gradasi Warna</h3>
+                <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${
+                  config.detectGradients !== false
+                    ? 'bg-rose-100 text-rose-900 border-rose-300'
+                    : 'bg-slate-200 text-slate-700 border-slate-300'
+                }`}>
+                  {config.detectGradients !== false ? 'AKTIF (Otomatis)' : 'NON-AKTIF (Warna Datar)'}
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-600 mt-0.5">
+                Area bergradasi dideteksi lalu dijadikan <strong>linear / radial gradient asli</strong> (bisa diedit di
+                Illustrator). Bila gradasinya terlalu rumit, otomatis dipecah menjadi pita warna bertingkat.
+              </p>
+            </div>
+          </div>
+          <button
+            id="toggle-gradients-btn"
+            type="button"
+            onClick={() => onChange({ ...config, detectGradients: config.detectGradients === false })}
+            className={`px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer shadow-2xs self-start md:self-auto ${
+              config.detectGradients !== false
+                ? 'bg-rose-600 text-white hover:bg-rose-700'
+                : 'bg-white text-slate-700 hover:bg-slate-100 border border-slate-300'
+            }`}
+          >
+            <CheckCircle2 className={`w-3.5 h-3.5 ${config.detectGradients !== false ? 'text-white' : 'text-slate-400'}`} />
+            <span>{config.detectGradients !== false ? 'Gradient Asli' : 'Warna Datar Saja'}</span>
+          </button>
+        </div>
+
+        {config.detectGradients !== false && (
+          <div className="pt-2 border-t border-rose-200/60 flex flex-wrap items-center gap-3 text-xs">
+            <div className="flex items-center gap-1.5 bg-white/90 border border-rose-200 rounded-lg px-2.5 py-1 text-[11px] text-slate-700 shadow-2xs">
+              <span className="font-semibold text-slate-600">Toleransi gradasi:</span>
+              <input
+                id="gradient-tolerance-slider"
+                type="range"
+                min="4"
+                max="20"
+                step="1"
+                value={config.gradientTolerance ?? 12}
+                onChange={(e) => onChange({ ...config, gradientTolerance: parseInt(e.target.value, 10) })}
+                className="w-24 accent-rose-600 cursor-pointer"
+                title="Galat rata-rata yang masih diterima. Lebih tinggi = lebih banyak area jadi gradient (lebih halus, tapi detail mirip warna bisa ikut tergabung). Lebih rendah = lebih ketat, sisanya jadi pita warna."
+              />
+              <span className="font-mono font-bold text-rose-700 min-w-[20px]">{config.gradientTolerance ?? 12}</span>
+              <span className="text-[10px] text-slate-500">(ketat ← → longgar)</span>
+            </div>
+
+            <div className="inline-flex items-center p-1 bg-white/95 rounded-xl border border-rose-200 gap-1 shadow-2xs">
+              <span className="text-[11px] font-semibold text-slate-600 px-1.5">Gradien di EPS:</span>
+              {([
+                { id: 'shading' as const, label: 'Gradient Asli', title: 'Smooth shading PostScript Level 3 — halus, ringan, terbaca sebagai gradien di Illustrator/Inkscape' },
+                { id: 'bands' as const, label: 'Pita Warna', title: 'Ditulis sebagai banyak pita warna solid (PostScript Level 2) — kompatibilitas maksimal untuk software/validator lama, file lebih besar' },
+              ]).map((opt) => (
+                <button
+                  key={opt.id}
+                  type="button"
+                  id={`eps-gradient-${opt.id}-btn`}
+                  title={opt.title}
+                  onClick={() => onChange({ ...config, epsGradientMode: opt.id })}
+                  className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition cursor-pointer ${
+                    (config.epsGradientMode ?? 'shading') === opt.id
+                      ? 'bg-rose-600 text-white shadow-xs'
+                      : 'text-slate-700 hover:bg-slate-100'
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+            <span className="text-[10px] text-slate-500">SVG selalu memakai gradient asli.</span>
           </div>
         )}
       </div>

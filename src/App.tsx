@@ -185,10 +185,11 @@ export default function App() {
     const dataUrl = sample.getDataUrl();
     const updatedConfig: VectorizeConfig = {
       ...currentConfig,
-      bgMode: sample.bgType === 'white' ? 'white' : 'magenta',
+      bgMode: sample.bgType === 'magenta' ? 'magenta' : 'white',
       removeBackground: true,
-      makeWhiteTransparent: sample.bgType === 'white',
-      keepInnerWhite: sample.bgType === 'white', // Mode Putih otomatis centang; Mode Magenta TIDAK tercentang
+      makeWhiteTransparent: sample.bgType !== 'magenta',
+      keepInnerWhite: sample.bgType !== 'magenta', // Mode Putih: putih dalam dipertahankan
+      whiteRegionOverrides: [],
     };
     setCurrentConfig(updatedConfig);
 
@@ -228,11 +229,17 @@ export default function App() {
     showToast('Antrean gambar dikosongkan', 'info');
   };
 
+  // Pilihan area putih bersifat per gambar → jangan ikut tertimpa pengaturan global.
+  const withItemRegions = (cfg: VectorizeConfig, item: ImageQueueItem): VectorizeConfig => ({
+    ...cfg,
+    whiteRegionOverrides: item.config.whiteRegionOverrides || [],
+  });
+
   const handleApplyConfigToQueue = () => {
     setQueue((prev) =>
       prev.map((i) => ({
         ...i,
-        config: { ...currentConfig },
+        config: withItemRegions(currentConfig, i),
       }))
     );
     showToast('Pengaturan preset diterapkan ke seluruh gambar di antrean', 'success');
@@ -248,7 +255,7 @@ export default function App() {
     }
     // Sync idle items with new settings
     setQueue((prev) =>
-      prev.map((i) => (i.status === 'idle' ? { ...i, config: { ...newConfig } } : i))
+      prev.map((i) => (i.status === 'idle' ? { ...i, config: withItemRegions(newConfig, i) } : i))
     );
   };
 
@@ -327,6 +334,7 @@ export default function App() {
         isProcessingBatch={isProcessingBatch}
         onBatchDownload={() => handleBatchDownloadZip('all')}
         whiteTransparentActive={currentConfig.makeWhiteTransparent}
+        bgMode={currentConfig.bgMode}
         activeCurveMode={currentConfig.curveStyle || currentConfig.mode || 'polygon'}
         actualUpscaleFactor={latestUpscaleFactor}
         onToggleCurveMode={(mode) =>
@@ -391,10 +399,10 @@ export default function App() {
         <div className="max-w-7xl mx-auto px-4 flex flex-col sm:flex-row items-center justify-between gap-2">
           <p className="flex items-center gap-1.5 justify-center">
             <Palette className="w-4 h-4 text-indigo-600" />
-            <strong>Vectorize Multi-Color Studio</strong> – Vektorisasi Berbagai Warna &amp; Latar Belakang Transparan
+            <strong>Vectorize Colorful Studio</strong> – Vektor Multi-Warna &amp; Gradasi, Background Putih Transparan
           </p>
           <p className="text-slate-400">
-            Output SVG &amp; EPS Level 3 • Pemrosesan Cepat &amp; Presisi
+            Output SVG &amp; EPS (gradient asli) • 100% di browser
           </p>
         </div>
       </footer>

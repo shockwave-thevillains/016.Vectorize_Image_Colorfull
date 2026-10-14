@@ -18,6 +18,15 @@ import { bakeTransformsWithSvgPath } from './svgTransformBaker';
 import { calculateTargetDimensions, scaleSvg } from './svgRescaler';
 import { buildVtracerOptions } from './vtracerOptions';
 import { vectorizeRgbaInWorker } from './vtracerClient';
+import { applyWhiteBackgroundRemoval } from './whiteRegions';
+import {
+  detectGradientRegions,
+  punchGradientRegions,
+  regionMaskToRgba,
+  GradientRegion,
+} from './gradientDetect';
+import { injectGradients, gradientStopColors } from './gradientSvg';
+import svgpath from 'svgpath';
 
 function getImageTracer() {
   if (typeof window !== 'undefined' && (window as any).ImageTracer) {
@@ -254,6 +263,29 @@ export const PRESETS: PresetDefinition[] = [
   },
 ];
 
+/** Kunci pengaturan background yang TIDAK boleh ditimpa saat memilih preset. */
+const BACKGROUND_KEYS: Array<keyof VectorizeConfig> = [
+  'bgMode',
+  'removeBackground',
+  'magentaTolerance',
+  'defringeMagenta',
+  'makeWhiteTransparent',
+  'keepInnerWhite',
+  'whiteTolerance',
+  'whiteRemovalMode',
+  'whiteRegionOverrides',
+  'removeShadow',
+  'shadowMinLight',
+  'defringeWhite',
+];
+
+/** Terapkan preset tanpa mengubah pilihan background / area putih / bayangan pengguna. */
+export function applyPreset(config: VectorizeConfig, preset: PresetDefinition): VectorizeConfig {
+  const next: Partial<VectorizeConfig> = { ...preset.config };
+  for (const k of BACKGROUND_KEYS) delete next[k];
+  return { ...config, ...next, preset: preset.id };
+}
+
 export const DEFAULT_CONFIG: VectorizeConfig = {
   engine: 'vtracer',
   preset: 'full_color',
@@ -263,7 +295,7 @@ export const DEFAULT_CONFIG: VectorizeConfig = {
   maxColors: 24,
   colorPrecision: 8,
   colorSnapping: true,
-  snappedColorCount: 12,
+  snappedColorCount: 16,
   curveStyle: 'polygon',
   mode: 'polygon',
   hierarchical: 'stacked',
@@ -272,15 +304,24 @@ export const DEFAULT_CONFIG: VectorizeConfig = {
   lengthThreshold: 10,
   rdpTolerance: 1.0,
   snapVertices: true,
-  // Background removal options: Magenta #FF00FF default, Putih #FFFFFF cadangan
-  bgMode: 'magenta',
+  // Background: Putih #FFFFFF default (Magenta tetap tersedia sebagai opsi)
+  bgMode: 'white',
   removeBackground: true,
   magentaTolerance: 14,
   defringeMagenta: true,
-  makeWhiteTransparent: false,
-  keepInnerWhite: false,
+  makeWhiteTransparent: true,
+  keepInnerWhite: true,
   whiteTolerance: 242,
   whiteRemovalMode: 'floodfill',
+  defringeWhite: true,
+  whiteRegionOverrides: [],
+  // Bayangan lembut: default dipertahankan
+  removeShadow: false,
+  shadowMinLight: 170,
+  // Gradasi warna → gradient vektor asli (cadangan: pita warna)
+  detectGradients: true,
+  gradientTolerance: 12,
+  epsGradientMode: 'shading',
   pathPrecision: 2,
   optimizeOutput: true,
 };
@@ -321,18 +362,20 @@ export function getMagentaDistancePercent(r: number, g: number, b: number): numb
  *    - Flood-fills white from the 4 outer borders.
  *    - Inner white (keepInnerWhite) is preserved by default.
  */
+export type WhiteRegionStats = { removed: number; kept: number; overridden: number };
+
 export function applyBackgroundTransparency(
   imageData: ImageData,
   config: VectorizeConfig
-): void {
+): WhiteRegionStats | undefined {
   const { width, height, data } = imageData;
   const totalPixels = width * height;
 
-  const bgMode = config.bgMode || 'magenta';
+  const bgMode = config.bgMode || 'white';
   const isRemovalActive = config.removeBackground !== false;
 
   if (!isRemovalActive && (!config.transparentColors || config.transparentColors.length === 0)) {
-    return;
+    return undefined;
   }
 
   // Protect locked palette colors from removal (Requirement 4)
@@ -463,105 +506,28 @@ export function applyBackgroundTransparency(
       }
     }
 
-    return;
+    return undefined;
   }
 
   // ==========================================
-  // MODE PUTIH (#FFFFFF) - CADANGAN
+  // MODE PUTIH (#FFFFFF) — area putih per klik + bayangan + defringe
   // ==========================================
-  const tol = config.whiteTolerance ?? 242;
-  const isPixelWhite = (idx: number): boolean => {
-    const r = data[idx];
-    const g = data[idx + 1];
-    const b = data[idx + 2];
-    const a = data[idx + 3];
-    if (a < 20) return true;
-    if (isPixelProtected(r, g, b)) return false;
-    return r >= tol && g >= tol && b >= tol;
-  };
-
-  if (config.keepInnerWhite === false) {
+  let stats: WhiteRegionStats | undefined;
+  if (isRemovalActive) {
+    const { map } = applyWhiteBackgroundRemoval(imageData, config);
+    stats = { removed: 0, kept: 0, overridden: 0 };
+    for (const r of map.regions) {
+      if (r.removed) stats.removed++;
+      else stats.kept++;
+      if (r.overridden) stats.overridden++;
+    }
+  }
+  if (config.transparentColors && config.transparentColors.length > 0) {
     for (let i = 0; i < totalPixels; i++) {
-      const idx = i * 4;
-      if (isPixelWhite(idx) || isPixelMatchCustom(idx)) {
-        data[idx + 3] = 0;
-      }
-    }
-    return;
-  }
-
-  // Floodfill from outer image border: Only outer white is removed!
-  const visited = new Uint8Array(totalPixels);
-  const queue = new Int32Array(totalPixels);
-  let head = 0;
-  let tail = 0;
-
-  for (let x = 0; x < width; x++) {
-    const topIdx = x;
-    if (isPixelWhite(topIdx * 4)) {
-      visited[topIdx] = 1;
-      queue[tail++] = topIdx;
-    }
-    const bottomIdx = (height - 1) * width + x;
-    if (isPixelWhite(bottomIdx * 4)) {
-      visited[bottomIdx] = 1;
-      queue[tail++] = bottomIdx;
+      if (isPixelMatchCustom(i * 4)) data[i * 4 + 3] = 0;
     }
   }
-
-  for (let y = 0; y < height; y++) {
-    const leftIdx = y * width;
-    if (!visited[leftIdx] && isPixelWhite(leftIdx * 4)) {
-      visited[leftIdx] = 1;
-      queue[tail++] = leftIdx;
-    }
-    const rightIdx = y * width + (width - 1);
-    if (!visited[rightIdx] && isPixelWhite(rightIdx * 4)) {
-      visited[rightIdx] = 1;
-      queue[tail++] = rightIdx;
-    }
-  }
-
-  while (head < tail) {
-    const curr = queue[head++];
-    const cx = curr % width;
-    const cy = (curr / width) | 0;
-
-    if (cx + 1 < width) {
-      const nIdx = curr + 1;
-      if (!visited[nIdx] && isPixelWhite(nIdx * 4)) {
-        visited[nIdx] = 1;
-        queue[tail++] = nIdx;
-      }
-    }
-    if (cx > 0) {
-      const nIdx = curr - 1;
-      if (!visited[nIdx] && isPixelWhite(nIdx * 4)) {
-        visited[nIdx] = 1;
-        queue[tail++] = nIdx;
-      }
-    }
-    if (cy + 1 < height) {
-      const nIdx = curr + width;
-      if (!visited[nIdx] && isPixelWhite(nIdx * 4)) {
-        visited[nIdx] = 1;
-        queue[tail++] = nIdx;
-      }
-    }
-    if (cy > 0) {
-      const nIdx = curr - width;
-      if (!visited[nIdx] && isPixelWhite(nIdx * 4)) {
-        visited[nIdx] = 1;
-        queue[tail++] = nIdx;
-      }
-    }
-  }
-
-  for (let i = 0; i < totalPixels; i++) {
-    if (visited[i] === 1 || isPixelMatchCustom(i * 4)) {
-      data[i * 4 + 3] = 0;
-    }
-  }
+  return stats;
 }
 
 // Backward-compatible alias
@@ -572,7 +538,8 @@ export const applyWhiteTransparency = applyBackgroundTransparency;
  */
 export function loadImageToCanvas(
   src: string,
-  config: VectorizeConfig
+  config: VectorizeConfig,
+  withGradients = false
 ): Promise<{
   canvas: HTMLCanvasElement;
   ctx: CanvasRenderingContext2D;
@@ -583,6 +550,9 @@ export function loadImageToCanvas(
   mergedColorCount: number;
   effectiveScale: number;
   snappedPalette?: string[];
+  gradientRegions: GradientRegion[];
+  gradientFallbackCount: number;
+  whiteStats?: WhiteRegionStats;
 }> {
   return new Promise((resolve, reject) => {
     const img = new Image();
@@ -644,6 +614,25 @@ export function loadImageToCanvas(
       let mergedColorCount = rawColorCount;
       let snappedPalette: string[] | undefined = undefined;
 
+      // 1. Background transparan DULU (pada piksel asli, sebelum snapping) supaya deteksi
+      //    gradasi dan palet tidak tercemar warna latar.
+      const isBgRemovalActive = config.removeBackground !== false;
+      let whiteStats: WhiteRegionStats | undefined;
+      if (isBgRemovalActive || (config.transparentColors && config.transparentColors.length > 0)) {
+        whiteStats = applyBackgroundTransparency(workingImageData, config);
+      }
+
+      // 2. Gradasi → gradient vektor asli. Area yang cocok dilubangi dari lapisan datar.
+      let gradientRegions: GradientRegion[] = [];
+      let gradientFallbackCount = 0;
+      if (withGradients && config.detectGradients !== false) {
+        const det = detectGradientRegions(workingImageData, { maxRmse: config.gradientTolerance ?? 12 });
+        gradientRegions = det.regions;
+        gradientFallbackCount = det.fallbackCount;
+        punchGradientRegions(workingImageData, gradientRegions);
+      }
+
+      // 3. Color snapping (area gradien sudah transparan → tidak ikut menentukan palet).
       if (config.colorSnapping !== false) {
         const targetK = config.snappedColorCount || config.maxColors || 12;
         const dominantPalette = extractDominantPalette(
@@ -657,23 +646,11 @@ export function loadImageToCanvas(
         snappedPalette = dominantPalette.map((c) => c.hex);
       }
 
-      const isBgRemovalActive = config.removeBackground !== false;
-      if (isBgRemovalActive || (config.transparentColors && config.transparentColors.length > 0)) {
-        applyBackgroundTransparency(workingImageData, config);
-      }
-
-      if (snappedPalette && isBgRemovalActive) {
-        if ((config.bgMode ?? 'magenta') === 'magenta') {
-          snappedPalette = snappedPalette.filter((hex) => {
-            const rgb = hexToRgb(hex);
-            return getMagentaDistancePercent(rgb.r, rgb.g, rgb.b) > (config.magentaTolerance ?? 14);
-          });
-        } else if (config.bgMode === 'white' && config.keepInnerWhite === false) {
-          snappedPalette = snappedPalette.filter((hex) => {
-            const h = hex.replace('#', '').toLowerCase();
-            return h !== 'ffffff' && h !== 'fff';
-          });
-        }
+      if (snappedPalette && isBgRemovalActive && (config.bgMode ?? 'white') === 'magenta') {
+        snappedPalette = snappedPalette.filter((hex) => {
+          const rgb = hexToRgb(hex);
+          return getMagentaDistancePercent(rgb.r, rgb.g, rgb.b) > (config.magentaTolerance ?? 14);
+        });
       }
 
       const canvas = document.createElement('canvas');
@@ -696,6 +673,9 @@ export function loadImageToCanvas(
         mergedColorCount,
         effectiveScale,
         snappedPalette,
+        gradientRegions,
+        gradientFallbackCount,
+        whiteStats,
       });
     };
     img.onerror = () => reject(new Error('Failed to load image for vectorization'));
@@ -873,14 +853,13 @@ function postProcessVtracerSvg(rawSvg: string, w: number, h: number, config: Vec
 
   let svg = bakeTransformsWithSvgPath(rawSvg);
 
-  const isMagentaMode = (config.bgMode ?? 'magenta') === 'magenta';
-  const isWhiteMode = config.bgMode === 'white';
+  const isMagentaMode = (config.bgMode ?? 'white') === 'magenta';
   const isBgRemoval = config.removeBackground !== false;
 
+  // Mode Putih: penghapusan sudah dilakukan per area di raster (termasuk pilihan putih dalam),
+  // jadi path putih yang tersisa memang dipertahankan dan TIDAK boleh disaring di sini.
   if (isMagentaMode && isBgRemoval) {
     svg = filterMagentaPathsInSvg(svg, config.magentaTolerance ?? 14);
-  } else if (isWhiteMode && config.keepInnerWhite === false) {
-    svg = filterWhitePathsInSvg(svg, config.whiteTolerance ?? 242);
   }
 
   if (!svg.includes('viewBox')) {
@@ -916,43 +895,39 @@ async function vectorizeWithVtracer(
   onProgress?.(15);
   await sleep(10);
 
-  const { width, height, imageData, rawColorCount, mergedColorCount, effectiveScale, snappedPalette } = await loadImageToCanvas(imageSrc, config);
+  const {
+    width,
+    height,
+    imageData,
+    rawColorCount,
+    mergedColorCount,
+    effectiveScale,
+    snappedPalette,
+    gradientRegions,
+    gradientFallbackCount,
+    whiteStats,
+  } = await loadImageToCanvas(imageSrc, config, true);
   onProgress?.(40);
 
   const vtracerOptions = buildVtracerOptions({ ...config, mergedColorCount, snappedPalette });
+  // Lapisan warna datar + setiap masker gradien di-trace paralel di pool worker.
   // Buffer piksel dipindahkan (zero-copy) ke worker; imageData tidak dipakai lagi setelah ini.
-  const { svg: rawSvg } = await vectorizeRgbaInWorker(imageData.data, width, height, vtracerOptions);
+  const flatJob = vectorizeRgbaInWorker(imageData.data, width, height, vtracerOptions);
+  const gradientJobs = gradientRegions.map((r) => traceGradientRegion(r, config));
+  const [{ svg: rawSvg }, gradientDs] = await Promise.all([flatJob, Promise.all(gradientJobs)]);
   onProgress?.(80);
 
-  const data = {
-    svgString: postProcessVtracerSvg(rawSvg, width || 600, height || 600, config),
-    width: width || 600,
-    height: height || 600,
-    processingTimeMs: 0,
-    engineUsed: '@visioncortex/vtracer (Rust/WASM, browser worker)',
-    engineVersion: 'v1.0.0-alpha.4',
-    activeMode: config.curveStyle || config.mode || 'polygon',
-    rawColorCount,
-    mergedColorCount,
-    actualUpscaleFactor: effectiveScale,
-    warnings: [] as string[],
-  };
+  let finalSvg = bakeTransformsWithSvgPath(postProcessVtracerSvg(rawSvg, width || 600, height || 600, config));
 
-  let finalSvg = bakeTransformsWithSvgPath(data.svgString);
-
-  const isMagentaMode = (config.bgMode ?? 'magenta') === 'magenta';
-  const isWhiteMode = config.bgMode === 'white';
-  const isBgRemoval = config.removeBackground !== false;
-
-  if (isMagentaMode && isBgRemoval) {
-    finalSvg = filterMagentaPathsInSvg(finalSvg, config.magentaTolerance ?? 14);
-  } else if (isWhiteMode && config.keepInnerWhite === false) {
-    finalSvg = filterWhitePathsInSvg(finalSvg, config.whiteTolerance ?? 242);
-  }
+  const gradientItems = gradientRegions
+    .map((r, i) => ({ spec: r.spec, d: gradientDs[i] }))
+    .filter((it) => it.d.length > 0);
+  const idPrefix = `vg${Math.random().toString(36).slice(2, 6)}_`;
+  finalSvg = injectGradients(finalSvg, gradientItems, idPrefix);
 
   const outputPreset = config.outputResolutionPreset || '15mp';
-  let outW = data.width || width;
-  let outH = data.height || height;
+  let outW = width || 600;
+  let outH = height || 600;
   let outMP = Number(((outW * outH) / 1000000).toFixed(2));
 
   if (outputPreset !== 'native') {
@@ -960,7 +935,6 @@ async function vectorizeWithVtracer(
     if (outputPreset === '20mp') targetMP = 20;
     else if (outputPreset === '25mp') targetMP = 25;
     else if (outputPreset === '30mp') targetMP = 30;
-    else if (outputPreset === 'custom') targetMP = Math.max(15, config.outputMegaPixels || 15);
     else targetMP = Math.max(15, config.outputMegaPixels || 15);
 
     const dims = calculateTargetDimensions(outW, outH, targetMP);
@@ -970,16 +944,7 @@ async function vectorizeWithVtracer(
     outMP = dims.megaPixels;
   }
 
-  const epsTitle = `${fileName.replace(/\.[^/.]+$/, '')}.eps`;
-  const skipWhiteInEps = Boolean(isWhiteMode && config.keepInnerWhite === false);
-  const skipMagentaInEps = Boolean(isMagentaMode && isBgRemoval);
-  const finalEps = convertSvgToEps(
-    finalSvg,
-    epsTitle,
-    skipWhiteInEps,
-    skipMagentaInEps,
-    config.magentaTolerance ?? 14
-  );
+  const finalEps = buildEpsForConfig(finalSvg, fileName, config);
 
   const palette = extractColorsFromSvg(finalSvg);
   const pathMatches = finalSvg.match(/<path\b/gi);
@@ -997,6 +962,13 @@ async function vectorizeWithVtracer(
     qualityMessage = 'Kualitas baik dan detail lengkap.';
   }
 
+  const warnings: string[] = [];
+  if (gradientFallbackCount > 0 && config.detectGradients !== false) {
+    warnings.push(
+      `${gradientFallbackCount} area bergradasi terlalu rumit untuk gradient linear/radial — dipecah menjadi pita warna. Naikkan "Toleransi gradasi" bila ingin dipaksa menjadi gradient.`
+    );
+  }
+
   onProgress?.(100);
 
   return {
@@ -1006,24 +978,72 @@ async function vectorizeWithVtracer(
     height: outH,
     outputMegaPixels: outMP,
     outputResolutionPreset: outputPreset,
-    colorCount: palette.length || config.maxColors,
+    colorCount: palette.length + gradientStopColors(finalSvg).length || config.maxColors,
     pathCount,
     palette,
     svgSize: svgBytes,
     epsSize: epsBytes,
     processingTimeMs: Math.round(performance.now() - startTime),
-    engineUsed: data.engineUsed || '@visioncortex/vtracer (Rust/WASM)',
-    engineVersion: data.engineVersion || 'v1.0.0-alpha.4',
-    activeMode: data.activeMode || config.curveStyle || config.mode || 'polygon',
-    rawColorCount: data.rawColorCount ?? rawColorCount,
-    mergedColorCount: data.mergedColorCount ?? mergedColorCount,
-    actualUpscaleFactor: data.actualUpscaleFactor ?? effectiveScale,
-    warnings: data.warnings || [],
-    hasTransparency: config.makeWhiteTransparent || finalSvg.includes('fill="none"'),
+    engineUsed: '@visioncortex/vtracer (Rust/WASM, browser worker)',
+    engineVersion: 'v1.0.0-alpha.4',
+    activeMode: config.curveStyle || config.mode || 'polygon',
+    rawColorCount,
+    mergedColorCount,
+    actualUpscaleFactor: effectiveScale,
+    warnings,
+    hasTransparency: config.removeBackground !== false,
     colorSnappingUsed: Boolean(config.colorSnapping !== false),
+    gradientCount: gradientItems.length,
+    gradientFallbackCount,
+    whiteRegions: whiteStats,
     qualityScore,
     qualityMessage,
   };
+}
+
+/**
+ * Trace masker satu area gradien (vtracer mode hitam-putih) → atribut `d` dalam koordinat kerja.
+ * String kosong bila tracing gagal (area tetap tampil dengan warna rata-rata lapisan datar).
+ */
+async function traceGradientRegion(r: GradientRegion, config: VectorizeConfig): Promise<string> {
+  try {
+    const { rgba, width, height, pad } = regionMaskToRgba(r);
+    const isPolygon = (config.curveStyle || config.mode || 'polygon') === 'polygon';
+    const { svg } = await vectorizeRgbaInWorker(rgba, width, height, {
+      clustering: 'bw',
+      mode: isPolygon ? 'polygon' : 'spline',
+      filterSpeckle: Math.min(config.filterSpeckle ?? 8, 8),
+      cornerThreshold: config.cornerThreshold ?? (isPolygon ? 28 : 55),
+      lengthThreshold: config.lengthThreshold ?? (isPolygon ? 10 : 4),
+      pathPrecision: 2,
+    });
+    const baked = bakeTransformsWithSvgPath(svg);
+    const ds: string[] = [];
+    const re = /<path\b[^>]*\bd=["']([^"']+)["']/gi;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(baked)) !== null) {
+      ds.push(svgpath(m[1]).translate(r.x0 - pad, r.y0 - pad).abs().round(2).toString());
+    }
+    return ds.join(' ');
+  } catch (err) {
+    console.warn('Gagal trace area gradien:', err);
+    return '';
+  }
+}
+
+/** EPS dari SVG akhir sesuai pengaturan (mode gradien EPS, background magenta). */
+export function buildEpsForConfig(svg: string, fileName: string, config: VectorizeConfig): string {
+  const epsTitle = `${fileName.replace(/\.[^/.]+$/, '')}.eps`;
+  const isMagentaMode = (config.bgMode ?? 'white') === 'magenta';
+  const skipMagenta = Boolean(isMagentaMode && config.removeBackground !== false);
+  return convertSvgToEps(
+    svg,
+    epsTitle,
+    false,
+    skipMagenta,
+    config.magentaTolerance ?? 14,
+    config.epsGradientMode ?? 'shading'
+  );
 }
 
 /**
@@ -1075,14 +1095,11 @@ async function vectorizeWithClient(
   onProgress?.(80);
   await sleep(10);
 
-  const isMagentaMode = (config.bgMode ?? 'magenta') === 'magenta';
-  const isWhiteMode = config.bgMode === 'white';
+  const isMagentaMode = (config.bgMode ?? 'white') === 'magenta';
   const isBgRemoval = config.removeBackground !== false;
 
   if (isMagentaMode && isBgRemoval) {
     rawSvg = filterMagentaPathsInSvg(rawSvg, config.magentaTolerance ?? 14);
-  } else if (isWhiteMode && !config.keepInnerWhite && config.whiteRemovalMode === 'global') {
-    rawSvg = filterWhitePathsInSvg(rawSvg, config.whiteTolerance);
   }
 
   if (!rawSvg.includes('viewBox')) {
@@ -1124,16 +1141,7 @@ async function vectorizeWithClient(
   const palette = extractColorsFromSvg(rawSvg);
   const pathMatches = rawSvg.match(/<path\b/gi);
   const pathCount = pathMatches ? pathMatches.length : 0;
-  const epsTitle = `${fileName.replace(/\.[^/.]+$/, '')}.eps`;
-  const skipWhiteInEps = Boolean(isWhiteMode && !config.keepInnerWhite);
-  const skipMagentaInEps = Boolean(isMagentaMode && isBgRemoval);
-  const epsString = convertSvgToEps(
-    rawSvg,
-    epsTitle,
-    skipWhiteInEps,
-    skipMagentaInEps,
-    config.magentaTolerance ?? 14
-  );
+  const epsString = buildEpsForConfig(rawSvg, fileName, config);
 
   onProgress?.(100);
   const endTime = performance.now();

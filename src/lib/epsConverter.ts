@@ -4,6 +4,11 @@
  * Accurately supports multi-color fills, bezier curves, and transparent backgrounds.
  */
 
+import { parseSvgGradients, ParsedGradient } from './gradientSvg';
+
+/** Cara menulis gradien di EPS: shading PostScript Level 3 asli, atau pita warna solid (Level 2). */
+export type EpsGradientMode = 'shading' | 'bands';
+
 interface RGBColor {
   r: number; // 0..1
   g: number; // 0..1
@@ -205,6 +210,139 @@ function svgPathToPostScript(d: string): string {
   return psLines.join('\n');
 }
 
+
+// ---------------------------------------------------------------------------
+// Gradien → PostScript
+// ---------------------------------------------------------------------------
+
+const f4 = (v: number) => Number(v.toFixed(4)).toString();
+
+function normalizedStops(g: ParsedGradient): Array<{ o: number; c: [number, number, number] }> {
+  const st = g.stops
+    .map((s) => ({ o: s.offset, c: [s.color[0] / 255, s.color[1] / 255, s.color[2] / 255] as [number, number, number] }))
+    .sort((a, b) => a.o - b.o);
+  if (st[0].o > 0) st.unshift({ o: 0, c: st[0].c });
+  if (st[st.length - 1].o < 1) st.push({ o: 1, c: st[st.length - 1].c });
+  st[0].o = 0;
+  st[st.length - 1].o = 1;
+  // offset harus naik tegas untuk /Bounds
+  for (let i = 1; i < st.length; i++) {
+    if (st[i].o <= st[i - 1].o) st[i].o = Math.min(1, st[i - 1].o + 1e-4);
+  }
+  return st;
+}
+
+function colorAt(st: Array<{ o: number; c: [number, number, number] }>, t: number): [number, number, number] {
+  if (t <= 0) return st[0].c;
+  if (t >= 1) return st[st.length - 1].c;
+  for (let i = 1; i < st.length; i++) {
+    if (t <= st[i].o) {
+      const a = st[i - 1], b = st[i];
+      const k = (t - a.o) / (b.o - a.o || 1);
+      return [a.c[0] + (b.c[0] - a.c[0]) * k, a.c[1] + (b.c[1] - a.c[1]) * k, a.c[2] + (b.c[2] - a.c[2]) * k];
+    }
+  }
+  return st[st.length - 1].c;
+}
+
+function psFunction(st: Array<{ o: number; c: [number, number, number] }>): string {
+  const t2 = (a: [number, number, number], b: [number, number, number]) =>
+    `<< /FunctionType 2 /Domain [0 1] /C0 [${a.map(f4).join(' ')}] /C1 [${b.map(f4).join(' ')}] /N 1 >>`;
+  if (st.length === 2) return t2(st[0].c, st[1].c);
+  const fns: string[] = [];
+  const bounds: string[] = [];
+  const encode: string[] = [];
+  for (let i = 0; i < st.length - 1; i++) {
+    fns.push(t2(st[i].c, st[i + 1].c));
+    encode.push('0 1');
+    if (i > 0) bounds.push(f4(st[i].o));
+  }
+  return `<< /FunctionType 3 /Domain [0 1] /Functions [${fns.join(' ')}] /Bounds [${bounds.join(' ')}] /Encode [${encode.join(' ')}] >>`;
+}
+
+/** Kotak pembatas kasar dari perintah path PostScript (titik akhir + titik kontrol). */
+function psPathBBox(ps: string): [number, number, number, number] | null {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const line of ps.split('\n')) {
+    const parts = line.trim().split(/\s+/);
+    const nums = parts.slice(0, -1).map(parseFloat);
+    for (let i = 0; i + 1 < nums.length; i += 2) {
+      const x = nums[i], y = nums[i + 1];
+      if (!isFinite(x) || !isFinite(y)) continue;
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+    }
+  }
+  return isFinite(minX) ? [minX, minY, maxX, maxY] : null;
+}
+
+/**
+ * Isi path (sudah terdefinisi sebagai current path) dengan gradien.
+ * Mengembalikan baris-baris PostScript, atau null bila matriks gradien rusak.
+ */
+function gradientFillPs(
+  g: ParsedGradient,
+  psPath: string,
+  isEvenOdd: boolean,
+  mode: EpsGradientMode
+): string[] | null {
+  const [a, b, c, d, e, f] = g.matrix;
+  const det = a * d - b * c;
+  if (!isFinite(det) || Math.abs(det) < 1e-9) return null;
+  const st = normalizedStops(g);
+  const lines: string[] = ['gsave', isEvenOdd ? 'eoclip' : 'clip', 'n', `[${[a, b, c, d, e, f].map(f4).join(' ')}] concat`];
+
+  if (mode === 'shading') {
+    const coords = g.type === 'linear' ? '[0 0 1 0]' : '[0 0 0 0 0 1]';
+    lines.push(
+      `<< /ShadingType ${g.type === 'linear' ? 2 : 3} /ColorSpace /DeviceRGB /Coords ${coords} /Extend [true true] /Function ${psFunction(st)} >> shfill`
+    );
+  } else {
+    // Pita warna solid: batas area dipetakan ke ruang gradien satuan.
+    const bb = psPathBBox(psPath) || [0, 0, 1, 1];
+    const corners = [
+      [bb[0], bb[1]],
+      [bb[2], bb[1]],
+      [bb[0], bb[3]],
+      [bb[2], bb[3]],
+    ].map(([x, y]) => {
+      const dx = x - e, dy = y - f;
+      return [(d * dx - c * dy) / det, (-b * dx + a * dy) / det];
+    });
+    const us = corners.map((p) => p[0]);
+    const vs = corners.map((p) => p[1]);
+    const umin = Math.min(...us, 0) - 0.01, umax = Math.max(...us, 1) + 0.01;
+    const vmin = Math.min(...vs) - 0.01, vmax = Math.max(...vs) + 0.01;
+
+    let path = 0;
+    for (let i = 1; i < st.length; i++) {
+      path += Math.hypot(st[i].c[0] - st[i - 1].c[0], st[i].c[1] - st[i - 1].c[1], st[i].c[2] - st[i - 1].c[2]) * 255;
+    }
+    const N = Math.max(12, Math.min(96, Math.ceil(path / 3)));
+    const rgbStr = (col: [number, number, number]) => `${col.map(f4).join(' ')} rgb`;
+
+    if (g.type === 'linear') {
+      lines.push(rgbStr(st[0].c), `${f4(umin)} ${f4(vmin)} ${f4(-umin + 0.0001)} ${f4(vmax - vmin)} rectfill`);
+      lines.push(rgbStr(st[st.length - 1].c), `1 ${f4(vmin)} ${f4(umax - 1)} ${f4(vmax - vmin)} rectfill`);
+      const bw = 1 / N;
+      for (let i = 0; i < N; i++) {
+        lines.push(rgbStr(colorAt(st, (i + 0.5) * bw)), `${f4(i * bw)} ${f4(vmin)} ${f4(bw * 1.02)} ${f4(vmax - vmin)} rectfill`);
+      }
+    } else {
+      const rmax = Math.max(1, ...corners.map((p) => Math.hypot(p[0], p[1]))) + 0.01;
+      lines.push(rgbStr(st[st.length - 1].c), `n 0 0 ${f4(rmax)} 0 360 arc f`);
+      for (let i = N - 1; i >= 0; i--) {
+        const r = (i + 1) / N;
+        lines.push(rgbStr(colorAt(st, (i + 0.5) / N)), `n 0 0 ${f4(r)} 0 360 arc f`);
+      }
+    }
+  }
+  lines.push('grestore');
+  return lines;
+}
+
 /**
  * Converts an SVG string into a standalone Encapsulated PostScript (.eps) string
  */
@@ -213,8 +351,12 @@ export function convertSvgToEps(
   title = 'vector_output.eps',
   skipWhite = false,
   skipMagenta = false,
-  magentaTolerance = 14
+  magentaTolerance = 14,
+  gradientMode: EpsGradientMode = 'shading'
 ): string {
+  const gradients = parseSvgGradients(svgString);
+  let usesShading = false;
+
   let width = 600;
   let height = 400;
 
@@ -255,6 +397,28 @@ export function convertSvgToEps(
 
     const fillRuleMatch = attrsStr.match(/\bfill-rule=["']([^"']+)["']/i);
     const isEvenOdd = fillRuleMatch ? fillRuleMatch[1].toLowerCase() === 'evenodd' : false;
+
+    // Isi gradien: fill="url(#id)"
+    const urlMatch = fillVal ? fillVal.match(/^url\(\s*#([^)\s]+)\s*\)$/i) : null;
+    if (urlMatch) {
+      const g = gradients.get(urlMatch[1]);
+      if (!g) continue;
+      const psPath = svgPathToPostScript(d);
+      if (!psPath.trim()) continue;
+      const gLines = gradientFillPs(g, psPath, isEvenOdd, gradientMode);
+      bodyParts.push('n');
+      bodyParts.push(psPath);
+      if (gLines) {
+        bodyParts.push(...gLines);
+        if (gradientMode === 'shading') usesShading = true;
+      } else {
+        // matriks rusak → warna tengah gradien
+        const mid = g.stops[Math.floor(g.stops.length / 2)].color;
+        bodyParts.push(`${(mid[0] / 255).toFixed(4)} ${(mid[1] / 255).toFixed(4)} ${(mid[2] / 255).toFixed(4)} rgb`);
+        bodyParts.push(isEvenOdd ? 'f*' : 'f');
+      }
+      continue;
+    }
 
     const fillColor = parseColor(fillVal);
     const strokeColor = parseColor(strokeVal);
@@ -326,7 +490,7 @@ export function convertSvgToEps(
 %%PageBoundingBox: 0 0 ${width} ${height}
 %%HiResBoundingBox: 0.0000 0.0000 ${width}.0000 ${height}.0000
 %%DocumentData: Clean7Bit
-%%LanguageLevel: 2
+%%LanguageLevel: ${usesShading ? 3 : 2}
 %%Pages: 1
 %%EndComments
 %%PageMedia: custom

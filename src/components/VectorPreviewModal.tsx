@@ -24,14 +24,14 @@ import {
   Image as ImageIcon,
 } from 'lucide-react';
 import { ImageQueueItem, VectorizeConfig, OutputResolutionPreset } from '../types';
-import { formatBytes, downloadFile } from '../lib/vectorizer';
+import { formatBytes, downloadFile, buildEpsForConfig } from '../lib/vectorizer';
+import { WhiteRegionPicker } from './WhiteRegionPicker';
 import {
   getOutputDimensionsForConfig,
   scaleSvg,
   renderSvgToPngBlob,
   MIN_OUTPUT_MEGAPIXELS,
 } from '../lib/svgRescaler';
-import { convertSvgToEps } from '../lib/epsConverter';
 import { formatFileName, getCleanBaseName } from '../lib/fileNameHelper';
 
 interface VectorPreviewModalProps {
@@ -51,7 +51,7 @@ export const VectorPreviewModal: React.FC<VectorPreviewModalProps> = ({
   onReVectorize,
   isProcessing,
 }) => {
-  const [activeTab, setActiveTab] = useState<'compare' | 'svg' | 'eps' | 'stats'>('compare');
+  const [activeTab, setActiveTab] = useState<'compare' | 'regions' | 'svg' | 'eps' | 'stats'>('compare');
   const [viewMode, setViewMode] = useState<'split' | 'sideBySide'>('split');
   const [sliderPosition, setSliderPosition] = useState<number>(50); // percentage 0..100
   const [zoomLevel, setZoomLevel] = useState<number>(1);
@@ -95,19 +95,7 @@ export const VectorPreviewModal: React.FC<VectorPreviewModalProps> = ({
 
   const getExportEps = () => {
     if (currentResolution.isNative) return result.epsString;
-    const epsTitle = `${item.name.replace(/\.[^/.]+$/, '')}.eps`;
-    const scaledSvg = getExportSvg();
-    const isMagentaMode = (item.config.bgMode ?? 'magenta') === 'magenta';
-    const isWhiteMode = item.config.bgMode === 'white';
-    const skipWhite = Boolean(isWhiteMode && item.config.keepInnerWhite === false);
-    const skipMagenta = Boolean(isMagentaMode && item.config.removeBackground !== false);
-    return convertSvgToEps(
-      scaledSvg,
-      epsTitle,
-      skipWhite,
-      skipMagenta,
-      item.config.magentaTolerance ?? 14
-    );
+    return buildEpsForConfig(getExportSvg(), item.name, item.config);
   };
 
   const handleSelectOutputPreset = (preset: OutputResolutionPreset) => {
@@ -278,7 +266,7 @@ export const VectorPreviewModal: React.FC<VectorPreviewModalProps> = ({
                     Kode: {effectiveCode.trim()}_{itemIndex}
                   </span>
                 )}
-                {item.config.removeBackground !== false && (item.config.bgMode ?? 'magenta') === 'magenta' && (
+                {item.config.removeBackground !== false && (item.config.bgMode ?? 'white') === 'magenta' && (
                   <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-pink-100 text-pink-800 border border-pink-300 flex items-center gap-1">
                     <span className="w-2 h-2 rounded-full bg-[#FF00FF] border border-pink-400" />
                     <span>Magenta Transparan (±{item.config.magentaTolerance ?? 14}%)</span>
@@ -305,6 +293,18 @@ export const VectorPreviewModal: React.FC<VectorPreviewModalProps> = ({
                 <span className="font-semibold text-indigo-700">{result.colorCount} warna</span>
                 <span>•</span>
                 <span>{result.pathCount} path kurva</span>
+                {(result.gradientCount ?? 0) > 0 && (
+                  <>
+                    <span>•</span>
+                    <span
+                      className="font-semibold text-rose-700"
+                      title={result.warnings?.join('\n') || 'Area bergradasi yang menjadi gradient vektor asli'}
+                    >
+                      {result.gradientCount} gradien
+                      {(result.gradientFallbackCount ?? 0) > 0 && ` (${result.gradientFallbackCount} jadi pita)`}
+                    </span>
+                  </>
+                )}
                 <span>•</span>
                 <span className="inline-flex items-center gap-1 font-semibold text-indigo-700 bg-indigo-50 px-2 py-0.5 rounded-full border border-indigo-200 text-[10px]">
                   <span>@visioncortex/vtracer WASM</span>
@@ -407,6 +407,19 @@ export const VectorPreviewModal: React.FC<VectorPreviewModalProps> = ({
               }`}
             >
               Bandingkan Vektor
+            </button>
+            <button
+              id="tab-regions-btn"
+              onClick={() => setActiveTab('regions')}
+              className={`px-3 py-1.5 text-xs font-bold rounded-lg transition flex items-center gap-1.5 cursor-pointer ${
+                activeTab === 'regions'
+                  ? 'bg-emerald-600 text-white shadow-2xs'
+                  : 'text-emerald-700 hover:bg-emerald-50'
+              }`}
+              title="Klik area putih untuk dihapus / dipertahankan"
+            >
+              <SunMedium className="w-3.5 h-3.5" />
+              <span>Area Putih</span>
             </button>
             <button
               id="tab-svg-btn"
@@ -617,7 +630,7 @@ export const VectorPreviewModal: React.FC<VectorPreviewModalProps> = ({
                     setModalConfig(updated);
                   }}
                   className={`px-2 py-0.5 rounded-md text-[11px] font-bold transition cursor-pointer flex items-center gap-1 ${
-                    (modalConfig.bgMode ?? 'magenta') === 'magenta'
+                    (modalConfig.bgMode ?? 'white') === 'magenta'
                       ? 'bg-fuchsia-600 text-white shadow-2xs'
                       : 'text-slate-600 hover:text-slate-900'
                   }`}
@@ -649,7 +662,7 @@ export const VectorPreviewModal: React.FC<VectorPreviewModalProps> = ({
               </div>
 
               {/* Mode-specific settings */}
-              {(modalConfig.bgMode ?? 'magenta') === 'magenta' ? (
+              {(modalConfig.bgMode ?? 'white') === 'magenta' ? (
                 <>
                   <div className="flex items-center gap-1.5 bg-white border border-pink-200 px-2 py-1 rounded-lg">
                     <span className="font-semibold text-slate-700">Toleransi:</span>
@@ -824,6 +837,14 @@ export const VectorPreviewModal: React.FC<VectorPreviewModalProps> = ({
 
         {/* Modal Main Body */}
         <div className="flex-1 min-h-0 bg-slate-900 overflow-hidden relative">
+          {activeTab === 'regions' && (
+            <WhiteRegionPicker
+              imageSrc={item.previewUrl}
+              config={item.config}
+              isProcessing={isProcessing}
+              onApply={(patch) => onReVectorize(item.id, { ...item.config, ...patch })}
+            />
+          )}
           {activeTab === 'compare' && (
             <div className="w-full h-full flex items-center justify-center p-4 overflow-auto">
               <div
