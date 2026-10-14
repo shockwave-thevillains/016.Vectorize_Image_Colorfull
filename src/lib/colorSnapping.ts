@@ -147,6 +147,9 @@ export function buildEdgeGradientMask(imageData: ImageData, threshold = 24): Uin
   return mask;
 }
 
+/** Selisih warna minimum (ΔE76) agar dua warna palet dianggap berbeda. */
+export const PALETTE_MIN_DELTA_E = 6;
+
 export interface ExtractedPalette extends Array<RGBColor> {
   rawColorCount: number;
   mergedColorCount: number;
@@ -257,7 +260,8 @@ export function extractDominantPalette(
 
   // 4. Select candidate peaks representing real distinct colors in the image
   const kLimit = Math.max(2, Math.min(32, targetK));
-  const minPixelCount = Math.max(15, Math.floor(flatPixelCount * 0.0005));
+  // Ambang rendah: warna kecil tapi penting (garis putus-putus, angka kecil) tetap masuk palet.
+  const minPixelCount = Math.max(8, Math.floor(flatPixelCount * 0.00012));
 
   for (const cand of candidates) {
     if (centers.length >= kLimit) break;
@@ -269,7 +273,8 @@ export function extractDominantPalette(
       if (dE < minDE) minDE = dE;
     }
 
-    if (minDE >= 10) {
+    // ΔE 6 (bukan 10): nuansa gelap yang mirip (hitam, abu bodi, abu velg) tetap jadi warna terpisah.
+    if (minDE >= PALETTE_MIN_DELTA_E) {
       centers.push([cand.r, cand.g, cand.b]);
     }
   }
@@ -348,7 +353,7 @@ export function extractDominantPalette(
     });
   }
 
-  // Merge clusters that have Delta E < 10
+  // Merge clusters that have Delta E < PALETTE_MIN_DELTA_E
   let clusters: RGBColor[] = [...rawColors];
   let changed = true;
   let mergePasses = 0;
@@ -369,7 +374,7 @@ export function extractDominantPalette(
         if (used[j]) continue;
         const other = clusters[j];
         const dE = deltaE76(c.r, c.g, c.b, other.r, other.g, other.b);
-        if (dE < 10 && dE < minDE) {
+        if (dE < PALETTE_MIN_DELTA_E && dE < minDE) {
           minDE = dE;
           bestMergeIdx = j;
         }
@@ -462,6 +467,81 @@ export function applyColorSnapping(
   }
 
   return { snappedImageData: imageData, paletteUsed: palette };
+}
+
+/**
+ * Snapping tepi yang sadar tetangga: piksel anti-aliasing (tepi) hanya boleh memakai warna palet yang
+ * benar-benar ada di sekitarnya (piksel datar dalam radius `radius`). Mencegah "halo" warna asing,
+ * mis. garis krem di sekeliling teks putih di atas merah, dan menjaga ketebalan huruf/angka kecil.
+ * `original` = data RGBA SEBELUM snapping, `edgeMask` = hasil buildEdgeGradientMask pada data asli.
+ */
+export function snapEdgesToLocalColors(
+  imageData: ImageData,
+  original: Uint8ClampedArray,
+  edgeMask: Uint8Array,
+  radius: number
+): void {
+  const { width, height, data } = imageData;
+  const total = width * height;
+  // Piksel tepi "yakin": warna aslinya sudah sangat dekat dengan warna palet hasil snapping biasa
+  // (mis. inti huruf putih yang tipis). Dipertahankan, dan ikut menjadi acuan tetangga — supaya
+  // garis/huruf tipis tidak terkikis.
+  const CONFIDENT_DIST_SQ = 2500;
+  const reference = new Uint8Array(total);
+  for (let idx = 0; idx < total; idx++) {
+    const p = idx * 4;
+    if (data[p + 3] < 30) continue;
+    if (!edgeMask[idx]) {
+      reference[idx] = 1;
+      continue;
+    }
+    const d = colorDistanceSq(original[p], original[p + 1], original[p + 2], data[p], data[p + 1], data[p + 2]);
+    if (d < CONFIDENT_DIST_SQ) reference[idx] = 1;
+  }
+
+  const out = new Uint8ClampedArray(data);
+  const cand: number[] = [];
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const idx = y * width + x;
+      if (reference[idx] || !edgeMask[idx]) continue;
+      const p = idx * 4;
+      if (data[p + 3] < 30) continue;
+      for (let pass = 0; pass < 2; pass++) {
+        const r = pass === 0 ? radius : radius * 2;
+        cand.length = 0;
+        for (let dy = -r; dy <= r; dy++) {
+          const yy = y + dy;
+          if (yy < 0 || yy >= height) continue;
+          for (let dx = -r; dx <= r; dx++) {
+            const xx = x + dx;
+            if (xx < 0 || xx >= width) continue;
+            const q = yy * width + xx;
+            if (!reference[q]) continue;
+            const j = q * 4;
+            const packed = (data[j] << 16) | (data[j + 1] << 8) | data[j + 2];
+            if (!cand.includes(packed)) cand.push(packed);
+          }
+        }
+        if (cand.length === 0) continue;
+        const or = original[p], og = original[p + 1], ob = original[p + 2];
+        let best = cand[0];
+        let bestD = Infinity;
+        for (const c of cand) {
+          const d = colorDistanceSq(or, og, ob, (c >> 16) & 255, (c >> 8) & 255, c & 255);
+          if (d < bestD) {
+            bestD = d;
+            best = c;
+          }
+        }
+        out[p] = (best >> 16) & 255;
+        out[p + 1] = (best >> 8) & 255;
+        out[p + 2] = best & 255;
+        break;
+      }
+    }
+  }
+  data.set(out);
 }
 
 /**

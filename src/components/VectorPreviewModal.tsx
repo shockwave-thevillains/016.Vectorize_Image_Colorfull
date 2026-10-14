@@ -716,7 +716,7 @@ export const VectorPreviewModal: React.FC<VectorPreviewModalProps> = ({
                     className="rounded text-emerald-600 focus:ring-emerald-500 w-3.5 h-3.5"
                   />
                   <span className="font-bold text-emerald-950">
-                    Putih di Tengah TIDAK Transparan
+                    Pertahankan Putih di Dalam Objek
                   </span>
                 </label>
               )}
@@ -830,7 +830,7 @@ export const VectorPreviewModal: React.FC<VectorPreviewModalProps> = ({
               className="px-3.5 py-1.5 rounded-xl bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 text-white font-bold transition disabled:opacity-50 flex items-center gap-1.5 shadow-sm shadow-indigo-600/20 cursor-pointer shrink-0"
             >
               <Sparkles className="w-3.5 h-3.5" />
-              <span>{isProcessing ? 'Memproses...' : 'Terapkan &amp; Vektorisasi Ulang'}</span>
+              <span>{isProcessing ? 'Memproses...' : 'Terapkan & Vektorisasi Ulang'}</span>
             </button>
           </div>
         )}

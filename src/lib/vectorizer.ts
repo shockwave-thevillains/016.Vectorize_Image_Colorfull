@@ -10,6 +10,8 @@ import {
 import {
   extractDominantPalette,
   applyColorSnapping,
+  buildEdgeGradientMask,
+  snapEdgesToLocalColors,
   optimizeAndMergeSvg,
   hexToRgb,
 } from './colorSnapping';
@@ -295,7 +297,7 @@ export const DEFAULT_CONFIG: VectorizeConfig = {
   maxColors: 24,
   colorPrecision: 8,
   colorSnapping: true,
-  snappedColorCount: 16,
+  snappedColorCount: 24,
   curveStyle: 'polygon',
   mode: 'polygon',
   hierarchical: 'stacked',
@@ -572,12 +574,13 @@ export function loadImageToCanvas(
       baseCtx.drawImage(img, 0, 0, origW, origH);
       const rawNativeData = baseCtx.getImageData(0, 0, origW, origH);
 
-      const MAX_WORKING_DIM = config.maxDimension || 2400;
+      // Resolusi kerja 3200 px: cukup untuk teks/angka kecil pada gambar ~1400 px (upscale ±2,3×).
+      const MAX_WORKING_DIM = config.maxDimension || 3200;
       const maxSourceDim = Math.max(origW, origH);
       let effectiveScale = 1;
       let workingImageData: ImageData;
 
-      if (maxSourceDim < 1600) {
+      if (maxSourceDim < MAX_WORKING_DIM / 1.15) {
         const requestedScale = config.upscale || 4;
         effectiveScale = Math.min(requestedScale, MAX_WORKING_DIM / maxSourceDim);
         if (effectiveScale < 1.15) effectiveScale = 1;
@@ -640,7 +643,15 @@ export function loadImageToCanvas(
           targetK,
           config.lockedPalette || []
         );
+        const preSnap = new Uint8ClampedArray(workingImageData.data);
+        const edgeMask = buildEdgeGradientMask(workingImageData, 24);
         applyColorSnapping(workingImageData, dominantPalette);
+        snapEdgesToLocalColors(
+          workingImageData,
+          preSnap,
+          edgeMask,
+          Math.max(2, Math.min(5, Math.round(effectiveScale * 1.5)))
+        );
         rawColorCount = dominantPalette.rawColorCount;
         mergedColorCount = dominantPalette.mergedColorCount;
         snappedPalette = dominantPalette.map((c) => c.hex);
@@ -909,11 +920,14 @@ async function vectorizeWithVtracer(
   } = await loadImageToCanvas(imageSrc, config, true);
   onProgress?.(40);
 
-  const vtracerOptions = buildVtracerOptions({ ...config, mergedColorCount, snappedPalette });
+  // Filter bintik dinyatakan untuk upscale 4×; pada upscale lebih kecil diperkecil sebanding
+  // supaya detail kecil (baut velg, garis pintu) tidak ikut terbuang.
+  const speckle = scaledSpeckle(config, effectiveScale);
+  const vtracerOptions = buildVtracerOptions({ ...config, filterSpeckle: speckle, mergedColorCount, snappedPalette });
   // Lapisan warna datar + setiap masker gradien di-trace paralel di pool worker.
   // Buffer piksel dipindahkan (zero-copy) ke worker; imageData tidak dipakai lagi setelah ini.
   const flatJob = vectorizeRgbaInWorker(imageData.data, width, height, vtracerOptions);
-  const gradientJobs = gradientRegions.map((r) => traceGradientRegion(r, config));
+  const gradientJobs = gradientRegions.map((r) => traceGradientRegion(r, { ...config, filterSpeckle: speckle }));
   const [{ svg: rawSvg }, gradientDs] = await Promise.all([flatJob, Promise.all(gradientJobs)]);
   onProgress?.(80);
 
@@ -999,6 +1013,11 @@ async function vectorizeWithVtracer(
     qualityScore,
     qualityMessage,
   };
+}
+
+export function scaledSpeckle(config: VectorizeConfig, effectiveScale: number): number {
+  const base = config.filterSpeckle ?? 12;
+  return Math.max(2, Math.round(base * Math.min(1, effectiveScale / 4)));
 }
 
 /**

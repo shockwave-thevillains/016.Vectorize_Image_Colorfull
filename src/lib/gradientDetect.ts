@@ -63,7 +63,7 @@ export interface GradientDetectOptions {
   minAreaFraction?: number;
   /** Sisi terpanjang resolusi analisis. Default 900. */
   analysisMaxDim?: number;
-  /** Jumlah area gradien maksimum per gambar. Default 48. */
+  /** Jumlah area gradien maksimum per gambar. Default 96. */
   maxRegions?: number;
 }
 
@@ -76,7 +76,10 @@ export interface GradientDetectResult {
 type Pixels = { data: Uint8ClampedArray | Uint8Array; width: number; height: number };
 
 const EDGE_T = 7; // ΔE langkah maksimum (gambar ter-blur) agar piksel bukan "tepi"
-const JOIN_T = 3.2; // ΔE maksimum antar tetangga agar digabung
+const JOIN_T = 3.2; // ΔE maksimum antar tetangga (ter-blur) agar digabung
+const RAW_JOIN_T = 4.5; // ΔE maksimum antar tetangga (asli) — dua warna datar yang mirip TIDAK boleh menyatu
+const MAX_SPLIT_DEPTH = 3; // area gagal di-fit dipecah paling banyak 3 tingkat (≤ 8 sub-area)
+const RAW_EDGE_T = 8; // langkah ΔE asli di atas ini = tepi tajam
 const OPAQUE = 128;
 
 // ---------------------------------------------------------------------------
@@ -321,7 +324,8 @@ function evaluateModel(
   for (let i = 1; i < cols.length; i++) {
     span = Math.max(span, Math.hypot(cols[i][0] - cols[0][0], cols[i][1] - cols[0][1], cols[i][2] - cols[0][2]));
   }
-  const edgeLike = total > 30 && maxStep > 0.5 * total;
+  // (juga untuk warna gelap yang selisihnya kecil: dua warna datar mirip bukan gradien)
+  const edgeLike = total > 8 && maxStep > 0.45 * total;
 
   let tol = 3.5;
   let stops = simplifyProfile(offs, cols, tol);
@@ -401,7 +405,7 @@ function find(parent: Int32Array, x: number): number {
 export function detectGradientRegions(img: Pixels, opts: GradientDetectOptions = {}): GradientDetectResult {
   const maxRmse = opts.maxRmse ?? 9;
   const minAreaFraction = opts.minAreaFraction ?? 0.0015;
-  const maxRegions = opts.maxRegions ?? 48;
+  const maxRegions = opts.maxRegions ?? 96;
   const A = downsample(img, opts.analysisMaxDim ?? 900);
   const { data, w, h, f } = A;
   const total = w * h;
@@ -453,8 +457,11 @@ export function detectGradientRegions(img: Pixels, opts: GradientDetectOptions =
     }
   }
   const lab = new Float32Array(total * 3);
+  const rawLab = new Float32Array(total * 3);
   for (let p = 0; p < total; p++) {
-    if (opaque[p]) toLab(blur[p * 3], blur[p * 3 + 1], blur[p * 3 + 2], lab, p * 3);
+    if (!opaque[p]) continue;
+    toLab(blur[p * 3], blur[p * 3 + 1], blur[p * 3 + 2], lab, p * 3);
+    toLab(data[p * 4], data[p * 4 + 1], data[p * 4 + 2], rawLab, p * 3);
   }
 
   // --- 2. Tandai piksel tepi & gabungkan tetangga mirip (union-find) ----------------
@@ -474,6 +481,7 @@ export function detectGradientRegions(img: Pixels, opts: GradientDetectOptions =
         }
         const d = dLab(lab, p, q);
         if (d > mx) mx = d;
+        if (dLab(rawLab, p, q) > RAW_EDGE_T) mx = Infinity;
       }
       if (mx > EDGE_T || touchesEmpty) edge[p] = 1;
     }
@@ -485,11 +493,11 @@ export function detectGradientRegions(img: Pixels, opts: GradientDetectOptions =
     for (let x = 0; x < w; x++) {
       const p = y * w + x;
       if (!opaque[p] || edge[p]) continue;
-      if (x + 1 < w && opaque[p + 1] && !edge[p + 1] && dLab(lab, p, p + 1) < JOIN_T) {
+      if (x + 1 < w && opaque[p + 1] && !edge[p + 1] && dLab(lab, p, p + 1) < JOIN_T && dLab(rawLab, p, p + 1) < RAW_JOIN_T) {
         const a = find(parent, p), b = find(parent, p + 1);
         if (a !== b) parent[a] = b;
       }
-      if (y + 1 < h && opaque[p + w] && !edge[p + w] && dLab(lab, p, p + w) < JOIN_T) {
+      if (y + 1 < h && opaque[p + w] && !edge[p + w] && dLab(lab, p, p + w) < JOIN_T && dLab(rawLab, p, p + w) < RAW_JOIN_T) {
         const a = find(parent, p), b = find(parent, p + w);
         if (a !== b) parent[a] = b;
       }
@@ -511,19 +519,14 @@ export function detectGradientRegions(img: Pixels, opts: GradientDetectOptions =
     }
   }
   const members: number[][] = candRoots.map(() => []);
-  const pixelComp = new Int32Array(total).fill(-1); // komponen kandidat per piksel inti
   for (let p = 0; p < total; p++) {
     if (!opaque[p] || edge[p]) continue;
     const ci = candIndex[find(parent, p)];
-    if (ci >= 0) {
-      members[ci].push(p);
-      pixelComp[p] = ci;
-    }
+    if (ci >= 0) members[ci].push(p);
   }
 
   // --- 4. Fitting per kandidat --------------------------------------------------------
   interface Accepted {
-    ci: number;
     spec: GradientSpec; // dalam koordinat ANALISIS
     pixels: number[];
     mean: Rgb;
@@ -531,12 +534,61 @@ export function detectGradientRegions(img: Pixels, opts: GradientDetectOptions =
   const accepted: Accepted[] = [];
   let fallbackCount = 0;
 
-  // Urutkan dari yang terbesar agar batas maxRegions memilih area terpenting.
-  const order = members.map((m, i) => i).sort((a, b) => members[b].length - members[a].length);
+  // Antrean area: mulai dari komponen hasil segmentasi (terbesar dulu). Area yang gagal di-fit
+  // dipecah menjadi sub-area berdasarkan warna lalu di-fit ulang (maks MAX_SPLIT_DEPTH tingkat),
+  // sehingga gradasi rumit (mis. muka-muka balok 3D) menjadi beberapa gradien halus, bukan pita warna.
+  const queue: Array<{ px: number[]; depth: number }> = members
+    .map((m) => ({ px: m, depth: 0 }))
+    .sort((a, b) => b.px.length - a.px.length);
+  const stamp = new Int32Array(total);
+  let stampId = 0;
+  const bfs = new Int32Array(total);
 
-  for (const ci of order) {
+  /** Pecah area menjadi 2 kelompok warna (2-means pada proyeksi sumbu utama), lalu komponen terhubung. */
+  const splitRegion = (px: number[], sv: Float64Array, depth: number): boolean => {
+    if (depth >= MAX_SPLIT_DEPTH || px.length < minArea * 2) return false;
+    let thr = 0;
+    for (let it = 0; it < 10; it++) {
+      let a = 0, na = 0, b = 0, nb = 0;
+      for (let k = 0; k < sv.length; k++) {
+        if (sv[k] < thr) { a += sv[k]; na++; } else { b += sv[k]; nb++; }
+      }
+      if (na === 0 || nb === 0) return false;
+      const next = (a / na + b / nb) / 2;
+      if (Math.abs(next - thr) < 0.25) break;
+      thr = next;
+    }
+    const idA = ++stampId, idB = ++stampId;
+    for (let k = 0; k < px.length; k++) stamp[px[k]] = sv[k] < thr ? idA : idB;
+    let pushed = 0;
+    for (const start of px) {
+      const id = stamp[start];
+      if (id !== idA && id !== idB) continue; // sudah dikunjungi
+      const visited = ++stampId;
+      let head = 0, tail = 0;
+      bfs[tail++] = start;
+      stamp[start] = visited;
+      const comp: number[] = [];
+      while (head < tail) {
+        const p = bfs[head++];
+        comp.push(p);
+        const x = p % w, y = (p / w) | 0;
+        if (x > 0 && stamp[p - 1] === id) { stamp[p - 1] = visited; bfs[tail++] = p - 1; }
+        if (x + 1 < w && stamp[p + 1] === id) { stamp[p + 1] = visited; bfs[tail++] = p + 1; }
+        if (y > 0 && stamp[p - w] === id) { stamp[p - w] = visited; bfs[tail++] = p - w; }
+        if (y + 1 < h && stamp[p + w] === id) { stamp[p + w] = visited; bfs[tail++] = p + w; }
+      }
+      if (comp.length >= minArea) {
+        queue.push({ px: comp, depth: depth + 1 });
+        pushed++;
+      }
+    }
+    return pushed > 0;
+  };
+
+  while (queue.length > 0) {
     if (accepted.length >= maxRegions) break;
-    const px = members[ci];
+    const { px, depth } = queue.shift()!;
     const n = px.length;
 
     // Rata-rata & kovarians RGB
@@ -695,7 +747,7 @@ export function detectGradientRegions(img: Pixels, opts: GradientDetectOptions =
     }
 
     if (candidates.length === 0) {
-      fallbackCount++;
+      if (!splitRegion(px, s, depth)) fallbackCount++;
       continue;
     }
     const score = (c: ModelEval) => c.rmse + (c.edgeLike ? 1e6 : 0);
@@ -707,13 +759,15 @@ export function detectGradientRegions(img: Pixels, opts: GradientDetectOptions =
 
     if (best.span < 14) continue; // perubahan warna terlalu kecil → anggap datar
     if (best.edgeLike || best.rmse > maxRmse || best.badFraction > 0.05) {
-      fallbackCount++;
+      if (!splitRegion(px, s, depth)) fallbackCount++;
       continue;
     }
-    accepted.push({ ci, spec: best.spec, pixels: px, mean: [mr, mg, mb] });
+    accepted.push({ spec: best.spec, pixels: px, mean: [mr, mg, mb] });
   }
 
   if (accepted.length === 0) return { regions: [], fallbackCount };
+  // Area terbesar paling bawah (urutan path gradien di SVG).
+  accepted.sort((a, b) => b.pixels.length - a.pixels.length);
 
   // --- 5. Klaim piksel tepi (anti-aliasing) ke area gradien terdekat ------------------
   const gLabel = new Int32Array(total).fill(-1);

@@ -21,6 +21,11 @@ npm run build   # wajib lolos sebelum commit
 - `src/lib/gradientDetect.ts` — segmentasi + fit linear (arah dari bidang & dari kelengkungan) /
   radial-elips, profil multi-stop (RDP). Area diterima → `mask` dilubangi dari lapisan datar,
   `fillMask` (lubang detail ditutup + dilatasi 2 px) di-trace vtracer mode `bw`.
+  Area yang gagal di-fit dipecah 2-means warna → komponen terhubung → fit ulang (maks 3 tingkat).
+  Penggabungan tetangga butuh ΔE kecil pada gambar ter-blur DAN asli (dua warna datar mirip ≠ gradien).
+- `src/lib/colorSnapping.ts` — palet: warna dianggap berbeda bila ΔE76 ≥ `PALETTE_MIN_DELTA_E` (6);
+  `snapEdgesToLocalColors` membatasi piksel anti-aliasing ke warna yang ada di sekitarnya (anti-halo).
+  Resolusi kerja maks 3200 px; filter bintik diskalakan dengan faktor upscale (`scaledSpeckle`).
 - `src/lib/gradientSvg.ts` — `<defs>` gradien kanonik (`userSpaceOnUse` + `gradientTransform=matrix`),
   path gradien disisipkan PALING BAWAH; `scaleGradientTransforms` dipanggil `scaleSvg`.
 - `src/lib/epsConverter.ts` — `fill="url(#id)"` → `shfill` Level 3 (`epsGradientMode: 'shading'`) atau

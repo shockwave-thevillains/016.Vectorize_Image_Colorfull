@@ -310,8 +310,8 @@ export default function App() {
     const targetItem = queue[queue.length - 1];
     if (targetItem && targetItem.width && targetItem.height) {
       const maxDim = Math.max(targetItem.width, targetItem.height);
-      const maxWorkingDim = targetItem.config?.maxDimension || 2400;
-      if (maxDim >= 1600 && maxDim <= maxWorkingDim) {
+      const maxWorkingDim = targetItem.config?.maxDimension || 3200;
+      if (maxDim >= maxWorkingDim / 1.15 && maxDim <= maxWorkingDim) {
         return 1.0;
       }
       if (maxDim > maxWorkingDim) {
