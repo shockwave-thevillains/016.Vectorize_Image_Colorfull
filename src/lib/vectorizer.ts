@@ -368,7 +368,8 @@ export type WhiteRegionStats = { removed: number; kept: number; overridden: numb
 
 export function applyBackgroundTransparency(
   imageData: ImageData,
-  config: VectorizeConfig
+  config: VectorizeConfig,
+  upscale = 1
 ): WhiteRegionStats | undefined {
   const { width, height, data } = imageData;
   const totalPixels = width * height;
@@ -516,7 +517,7 @@ export function applyBackgroundTransparency(
   // ==========================================
   let stats: WhiteRegionStats | undefined;
   if (isRemovalActive) {
-    const { map } = applyWhiteBackgroundRemoval(imageData, config);
+    const { map } = applyWhiteBackgroundRemoval(imageData, config, upscale);
     stats = { removed: 0, kept: 0, overridden: 0 };
     for (const r of map.regions) {
       if (r.removed) stats.removed++;
@@ -622,7 +623,7 @@ export function loadImageToCanvas(
       const isBgRemovalActive = config.removeBackground !== false;
       let whiteStats: WhiteRegionStats | undefined;
       if (isBgRemovalActive || (config.transparentColors && config.transparentColors.length > 0)) {
-        whiteStats = applyBackgroundTransparency(workingImageData, config);
+        whiteStats = applyBackgroundTransparency(workingImageData, config, effectiveScale);
       }
 
       // 2. Gradasi → gradient vektor asli. Area yang cocok dilubangi dari lapisan datar.

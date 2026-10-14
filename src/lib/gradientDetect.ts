@@ -54,6 +54,8 @@ export interface GradientRegion {
   h: number;
   meanColor: Rgb;
   area: number;
+  /** Jumlah piksel fillMask (untuk urutan tumpukan) */
+  fillArea: number;
 }
 
 export interface GradientDetectOptions {
@@ -61,7 +63,7 @@ export interface GradientDetectOptions {
   maxRmse?: number;
   /** Luas minimum area (fraksi dari piksel tidak transparan). Default 0.0015. */
   minAreaFraction?: number;
-  /** Sisi terpanjang resolusi analisis. Default 900. */
+  /** Sisi terpanjang resolusi analisis. Default 1400. */
   analysisMaxDim?: number;
   /** Jumlah area gradien maksimum per gambar. Default 96. */
   maxRegions?: number;
@@ -78,6 +80,7 @@ type Pixels = { data: Uint8ClampedArray | Uint8Array; width: number; height: num
 const EDGE_T = 7; // ΔE langkah maksimum (gambar ter-blur) agar piksel bukan "tepi"
 const JOIN_T = 3.2; // ΔE maksimum antar tetangga (ter-blur) agar digabung
 const RAW_JOIN_T = 4.5; // ΔE maksimum antar tetangga (asli) — dua warna datar yang mirip TIDAK boleh menyatu
+const GROW_T = 18; // selisih warna maks. (RGB) agar piksel sisa diserap area gradien tetangganya
 const MAX_SPLIT_DEPTH = 3; // area gagal di-fit dipecah paling banyak 3 tingkat (≤ 8 sub-area)
 const RAW_EDGE_T = 8; // langkah ΔE asli di atas ini = tepi tajam
 const OPAQUE = 128;
@@ -406,7 +409,7 @@ export function detectGradientRegions(img: Pixels, opts: GradientDetectOptions =
   const maxRmse = opts.maxRmse ?? 9;
   const minAreaFraction = opts.minAreaFraction ?? 0.0015;
   const maxRegions = opts.maxRegions ?? 96;
-  const A = downsample(img, opts.analysisMaxDim ?? 900);
+  const A = downsample(img, opts.analysisMaxDim ?? 1400);
   const { data, w, h, f } = A;
   const total = w * h;
 
@@ -618,6 +621,25 @@ export function detectGradientRegions(img: Pixels, opts: GradientDetectOptions =
     const { v, lambda } = principalAxis(cov);
     if (Math.sqrt(lambda) < 5) continue; // praktis warna datar → biarkan pipeline biasa
 
+    // Area yang didominasi satu warna datar (mis. ban hitam + sedikit tepi) BUKAN gradien:
+    // bila ≥ 55% piksel berada dekat warna terbanyak, serahkan ke lapisan warna datar.
+    {
+      const bins = new Map<number, number>();
+      for (const p of px) {
+        const i = p * 4;
+        const key = ((data[i] >> 3) << 10) | ((data[i + 1] >> 3) << 5) | (data[i + 2] >> 3);
+        bins.set(key, (bins.get(key) || 0) + 1);
+      }
+      let modeKey = 0, modeCount = -1;
+      for (const [k, c] of bins) if (c > modeCount) { modeCount = c; modeKey = k; }
+      const mr0 = (modeKey >> 10) & 31, mg0 = (modeKey >> 5) & 31, mb0 = modeKey & 31;
+      let near = 0;
+      for (const [k, c] of bins) {
+        if (Math.abs(((k >> 10) & 31) - mr0) <= 1 && Math.abs(((k >> 5) & 31) - mg0) <= 1 && Math.abs((k & 31) - mb0) <= 1) near += c;
+      }
+      if (near / n >= 0.55) continue;
+    }
+
     const S = Math.max(4, Math.max(maxX - minX, maxY - minY) / 2);
     // Nilai skalar per piksel = proyeksi warna ke sumbu utama
     const s = new Float64Array(n);
@@ -785,6 +807,29 @@ export function detectGradientRegions(img: Pixels, opts: GradientDetectOptions =
     evalStops(accepted[gi].spec.stops, t, out);
   };
   const pred = new Float64Array(3);
+  // --- 5a. Tumbuhkan area gradien ke piksel datar di sekitarnya yang warnanya cocok dengan prediksi
+  //         gradien (sisa kecil hasil pemecahan / tepi area) — mencegah bercak warna datar di dalam muka.
+  for (let pass = 0; pass < 12; pass++) {
+    const grow: Array<[number, number]> = [];
+    for (let p = 0; p < total; p++) {
+      if (!opaque[p] || edge[p] || gLabel[p] !== -1) continue;
+      const x = p % w, y = (p / w) | 0;
+      const nbs = [x > 0 ? p - 1 : -1, x + 1 < w ? p + 1 : -1, y > 0 ? p - w : -1, y + 1 < h ? p + w : -1];
+      let bestG = -1, bestD = GROW_T;
+      for (const q of nbs) {
+        if (q < 0 || gLabel[q] < 0) continue;
+        predAt(gLabel[q], p, pred);
+        const i = p * 4;
+        const d = Math.hypot(data[i] - pred[0], data[i + 1] - pred[1], data[i + 2] - pred[2]);
+        if (d < bestD) { bestD = d; bestG = gLabel[q]; }
+      }
+      if (bestG >= 0) grow.push([p, bestG]);
+    }
+    if (grow.length === 0) break;
+    for (const [p, g] of grow) gLabel[p] = g;
+  }
+
+  // --- 5b. Klaim piksel tepi
   for (let pass = 0; pass < 2; pass++) {
     const claims: Array<[number, number]> = [];
     for (let y = 0; y < h; y++) {
@@ -819,7 +864,9 @@ export function detectGradientRegions(img: Pixels, opts: GradientDetectOptions =
           }
         }
         // Piksel komponen kecil (mis. teks tipis) hanya diklaim bila warnanya memang mirip gradien.
-        const limit = edge[p] ? 90 : 35;
+        // Ketat: piksel tepi hanya diklaim bila warnanya memang dekat prediksi gradien, supaya huruf
+        // tipis (mis. "OFF" putih di atas lencana gradien) tidak tertelan.
+        const limit = edge[p] ? 45 : 30;
         if (bestG >= 0 && bestD <= otherD && bestD < limit) claims.push([p, bestG]);
       }
     }
@@ -936,9 +983,14 @@ export function detectGradientRegions(img: Pixels, opts: GradientDetectOptions =
       h: MH,
       meanColor: [Math.round(a.mean[0]), Math.round(a.mean[1]), Math.round(a.mean[2])],
       area,
+      fillArea: fill.reduce((acc, v) => acc + v, 0),
     });
   });
 
+  // Urutan tumpukan: bentuk yang melingkupi (luas fillMask terbesar, termasuk lubang yang ditutupnya)
+  // paling bawah, sehingga gradien di dalam lubangnya (mis. lingkaran merah di dalam cincin emas)
+  // tetap di atas dan tidak tertutup.
+  regions.sort((a, b) => b.fillArea - a.fillArea);
   return { regions, fallbackCount };
 }
 

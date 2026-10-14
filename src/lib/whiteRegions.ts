@@ -365,7 +365,9 @@ export function defringeWhiteEdges(
 /** Jalankan seluruh proses background putih di tempat (alpha = 0 untuk piksel yang dihapus). */
 export function applyWhiteBackgroundRemoval(
   img: Pixels,
-  config: VectorizeConfig
+  config: VectorizeConfig,
+  /** Faktor upscale gambar kerja: pita anti-aliasing ikut melebar, jadi defringe butuh lebih banyak lintasan. */
+  upscale = 1
 ): BackgroundMaskResult {
   const result = computeWhiteBackgroundMask(img, config);
   const { data } = img;
@@ -380,7 +382,7 @@ export function applyWhiteBackgroundRemoval(
       const l = result.map.labels[p];
       if (l !== -1 && !result.map.regions[l].removed) protect[p] = 1;
     }
-    defringeWhiteEdges(img, result.mask, protect);
+    defringeWhiteEdges(img, result.mask, protect, Math.max(3, Math.round(upscale * 2) + 1));
   }
   return result;
 }
