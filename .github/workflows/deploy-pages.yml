@@ -17,7 +17,7 @@ permissions:
   contents: read
   pages: write
   id-token: write
-  actions: read
+  actions: write
 
 concurrency:
   group: pages
@@ -87,17 +87,26 @@ jobs:
             fi
           fi
 
-      - name: Tunggu deploy mentah (legacy) untuk commit ini selesai
+      - name: Batalkan deploy mentah (legacy) untuk commit ini
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          for i in $(seq 1 36); do
-            n=$(gh api "repos/${{ github.repository }}/actions/runs?head_sha=${{ github.sha }}&per_page=50" \
-              --jq '[.workflow_runs[] | select(.name == "pages build and deployment" and .status != "completed")] | length' || echo 0)
-            if [ "$n" = "0" ]; then echo "Tidak ada deploy legacy yang berjalan."; exit 0; fi
-            echo "Menunggu $n deploy legacy selesai…"; sleep 10
+          list_legacy() {
+            gh api "repos/${{ github.repository }}/actions/runs?head_sha=${{ github.sha }}&per_page=50" \
+              --jq '.workflow_runs[] | select(.name == "pages build and deployment" and .status != "completed") | .id' || true
+          }
+          # Deploy mentah menyajikan source tanpa build (halaman putih) dan kadang tersangkut lama:
+          # batalkan, lalu tunggu sampai benar-benar berhenti (maks. 3 menit).
+          for i in $(seq 1 18); do
+            ids=$(list_legacy)
+            if [ -z "$ids" ]; then echo "Tidak ada deploy legacy yang berjalan."; exit 0; fi
+            for id in $ids; do
+              echo "Membatalkan deploy legacy run $id"
+              gh api -X POST "repos/${{ github.repository }}/actions/runs/$id/cancel" >/dev/null 2>&1 || true
+            done
+            sleep 10
           done
-          echo "::warning::Deploy legacy belum selesai setelah 6 menit; tetap lanjut."
+          echo "::warning::Deploy legacy belum berhenti setelah 3 menit; tetap lanjut."
 
       - id: deployment
         uses: actions/deploy-pages@v4
