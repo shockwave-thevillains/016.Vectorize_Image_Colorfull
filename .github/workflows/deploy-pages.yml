@@ -9,7 +9,8 @@ name: Deploy to GitHub Pages
 
 on:
   push:
-    branches: [main]
+    # main = branch normal; claude/awesome-goldberg-vw1qfi = branch default repo ini saat ini
+    branches: [main, claude/awesome-goldberg-vw1qfi]
   workflow_dispatch:
 
 permissions:
