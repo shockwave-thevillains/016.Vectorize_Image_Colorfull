@@ -342,7 +342,7 @@ export default function App() {
             ...currentConfig,
             curveStyle: mode,
             mode,
-            cornerThreshold: mode === 'polygon' ? 28 : 55,
+            cornerThreshold: mode === 'polygon' ? 28 : 60,
             lengthThreshold: mode === 'polygon' ? 10 : 4,
           })
         }

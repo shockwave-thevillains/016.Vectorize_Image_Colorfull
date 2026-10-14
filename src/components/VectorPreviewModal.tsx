@@ -730,6 +730,9 @@ export const VectorPreviewModal: React.FC<VectorPreviewModalProps> = ({
                       ...modalConfig,
                       curveStyle: e.target.value as any,
                       mode: e.target.value as any,
+                      // ambang yang cocok untuk tiap mode (spline: huruf/angka bulat halus)
+                      cornerThreshold: e.target.value === 'polygon' ? 28 : 60,
+                      lengthThreshold: e.target.value === 'polygon' ? 10 : 4,
                     })
                   }
                   className="bg-transparent text-indigo-700 font-bold focus:outline-none cursor-pointer"
