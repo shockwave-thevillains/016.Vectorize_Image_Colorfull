@@ -1,0 +1,6 @@
+{
+  "name": "Vectorize Multi-Color Studio",
+  "description": "Convert images and photos into high-quality scalable vector graphics (SVG & EPS) with full multi-color tracing and white-to-transparent background removal.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

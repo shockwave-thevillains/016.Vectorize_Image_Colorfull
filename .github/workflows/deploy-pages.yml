@@ -1,0 +1,101 @@
+name: Deploy to GitHub Pages
+
+# Build sekali, lalu deploy ke SATU tujuan:
+#   • Repository variable PAGES_REPO diisi (mis. "akun-lain/nama-repo")
+#       → hasil build di-push ke branch PAGES_BRANCH (default: gh-pages) di repo itu,
+#         memakai deploy key di secret PAGES_DEPLOY_KEY.
+#   • PAGES_REPO kosong
+#       → deploy ke GitHub Pages repo ini sendiri (perilaku lama).
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Type-check
+        run: npm run lint
+
+      - name: Build
+        run: npm run build
+
+      # --- Tujuan: Pages repo ini sendiri ---
+      - if: ${{ vars.PAGES_REPO == '' }}
+        uses: actions/configure-pages@v5
+
+      - if: ${{ vars.PAGES_REPO == '' }}
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+      # --- Tujuan: repo di akun lain ---
+      - if: ${{ vars.PAGES_REPO != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: site
+          path: dist
+          retention-days: 1
+
+  deploy-self:
+    if: ${{ vars.PAGES_REPO == '' }}
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
+
+  deploy-external:
+    if: ${{ vars.PAGES_REPO != '' }}
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check deploy key
+        env:
+          HAS_KEY: ${{ secrets.PAGES_DEPLOY_KEY != '' }}
+        run: |
+          if [ "$HAS_KEY" != "true" ]; then
+            echo "::error::Secret PAGES_DEPLOY_KEY belum diisi. Lihat README bagian 'Hosting di repo akun lain'."
+            exit 1
+          fi
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: site
+          path: dist
+
+      - name: Push build to ${{ vars.PAGES_REPO }}
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          deploy_key: ${{ secrets.PAGES_DEPLOY_KEY }}
+          external_repository: ${{ vars.PAGES_REPO }}
+          publish_branch: ${{ vars.PAGES_BRANCH || 'gh-pages' }}
+          publish_dir: ./dist
+          force_orphan: true
+          user_name: github-actions[bot]
+          user_email: 41898282+github-actions[bot]@users.noreply.github.com
+          full_commit_message: "Deploy ${{ github.repository }}@${{ github.sha }}"
