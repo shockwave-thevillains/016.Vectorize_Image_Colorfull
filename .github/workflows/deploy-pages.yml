@@ -17,6 +17,7 @@ permissions:
   contents: read
   pages: write
   id-token: write
+  actions: read
 
 concurrency:
   group: pages
@@ -67,6 +68,37 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      # Bila Settings → Pages → Source masih "Deploy from a branch", GitHub juga menjalankan
+      # "pages build and deployment" yang menyajikan source mentah (halaman putih). Coba alihkan
+      # Source ke "GitHub Actions" secara otomatis; bila token tidak diizinkan, langkah berikutnya
+      # memastikan deploy versi build tetap yang terakhir.
+      - name: Alihkan Pages ke mode GitHub Actions
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          current=$(gh api "repos/${{ github.repository }}/pages" --jq '.build_type' || echo unknown)
+          echo "build_type saat ini: $current"
+          if [ "$current" != "workflow" ]; then
+            if gh api -X PUT "repos/${{ github.repository }}/pages" -f build_type=workflow; then
+              echo "Pages dialihkan ke mode GitHub Actions."
+            else
+              echo "::warning::Tidak bisa mengubah Source Pages otomatis. Ubah manual: Settings → Pages → Source → GitHub Actions."
+            fi
+          fi
+
+      - name: Tunggu deploy mentah (legacy) untuk commit ini selesai
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for i in $(seq 1 36); do
+            n=$(gh api "repos/${{ github.repository }}/actions/runs?head_sha=${{ github.sha }}&per_page=50" \
+              --jq '[.workflow_runs[] | select(.name == "pages build and deployment" and .status != "completed")] | length' || echo 0)
+            if [ "$n" = "0" ]; then echo "Tidak ada deploy legacy yang berjalan."; exit 0; fi
+            echo "Menunggu $n deploy legacy selesai…"; sleep 10
+          done
+          echo "::warning::Deploy legacy belum selesai setelah 6 menit; tetap lanjut."
+
       - id: deployment
         uses: actions/deploy-pages@v4
 
