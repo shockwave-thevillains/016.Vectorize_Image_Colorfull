@@ -879,6 +879,59 @@ export function detectGradientRegions(img: Pixels, opts: GradientDetectOptions =
     for (const [p, g] of grow) gLabel[p] = g;
   }
 
+  // --- 5a2. Lubang kecil yang terkurung huruf/detail (mis. bagian dalam "0" atau bulatan "%") tidak
+  //          bersentuhan langsung dengan area gradien, jadi tak terjangkau langkah tumbuh. Komponen
+  //          kecil seperti itu diserap ke area gradien terdekat (dalam ±8 px) bila warnanya cocok.
+  {
+    const seen = new Uint8Array(total);
+    const stack = new Int32Array(total);
+    const maxHole = Math.max(minArea * 4, 400);
+    for (let start = 0; start < total; start++) {
+      if (seen[start] || !opaque[start] || edge[start] || gLabel[start] !== -1) continue;
+      let sp = 0;
+      stack[sp++] = start;
+      seen[start] = 1;
+      const comp: number[] = [];
+      let tooBig = false;
+      while (sp > 0) {
+        const p = stack[--sp];
+        if (comp.length <= maxHole) comp.push(p); else tooBig = true;
+        const x = p % w, y = (p / w) | 0;
+        const nbs = [x > 0 ? p - 1 : -1, x + 1 < w ? p + 1 : -1, y > 0 ? p - w : -1, y + 1 < h ? p + w : -1];
+        for (const q of nbs) {
+          if (q < 0 || seen[q] || !opaque[q] || edge[q] || gLabel[q] !== -1) continue;
+          seen[q] = 1;
+          stack[sp++] = q;
+        }
+      }
+      if (tooBig || comp.length === 0) continue;
+      // area gradien terdekat: cari ke luar dari titik tengah komponen
+      let cx = 0, cy = 0, mr = 0, mg = 0, mb = 0;
+      for (const p of comp) {
+        cx += p % w; cy += (p / w) | 0;
+        mr += data[p * 4]; mg += data[p * 4 + 1]; mb += data[p * 4 + 2];
+      }
+      const n = comp.length;
+      cx = Math.round(cx / n); cy = Math.round(cy / n);
+      const votes = new Map<number, number>();
+      for (const p of comp) {
+        const x = p % w, y = (p / w) | 0;
+        for (const [dx, dy] of [[8, 0], [-8, 0], [0, 8], [0, -8], [6, 6], [-6, 6], [6, -6], [-6, -6]]) {
+          const xx = x + dx, yy = y + dy;
+          if (xx < 0 || yy < 0 || xx >= w || yy >= h) continue;
+          const g = gLabel[yy * w + xx];
+          if (g >= 0) votes.set(g, (votes.get(g) || 0) + 1);
+        }
+      }
+      let bestG = -1, bestV = 0;
+      for (const [g, v] of votes) if (v > bestV) { bestV = v; bestG = g; }
+      if (bestG < 0) continue;
+      predAt(bestG, cy * w + cx, pred);
+      if (Math.hypot(mr / n - pred[0], mg / n - pred[1], mb / n - pred[2]) > 28) continue;
+      for (const p of comp) gLabel[p] = bestG;
+    }
+  }
+
   // --- 5b. Klaim piksel tepi
   for (let pass = 0; pass < 2; pass++) {
     const claims: Array<[number, number]> = [];
@@ -943,8 +996,31 @@ export function detectGradientRegions(img: Pixels, opts: GradientDetectOptions =
     const Y1 = Math.min(img.height, (maxY + 2) * f);
     const MW = X1 - X0, MH = Y1 - Y0;
     const raw = new Uint8Array(MW * MH);
-    const sample = (ax: number, ay: number) =>
-      ax >= 0 && ay >= 0 && ax < w && ay < h && gLabel[ay * w + ax] === gi ? 1 : 0;
+    // Masker analisis dihaluskan dulu ([1 2 1]² ) lalu diinterpolasi bilinear → tepi melengkung
+    // mulus saat diperbesar, bukan tangga piksel analisis.
+    const bx0 = Math.max(0, minX - 3), by0 = Math.max(0, minY - 3);
+    const bx1 = Math.min(w - 1, maxX + 3), by1 = Math.min(h - 1, maxY + 3);
+    const bw = bx1 - bx0 + 1, bh = by1 - by0 + 1;
+    const smooth = new Float32Array(bw * bh);
+    {
+      const tmpRow = new Float32Array(bw * bh);
+      const at = (x: number, y: number) =>
+        x >= 0 && y >= 0 && x < w && y < h && gLabel[y * w + x] === gi ? 1 : 0;
+      for (let y = 0; y < bh; y++)
+        for (let x = 0; x < bw; x++)
+          tmpRow[y * bw + x] =
+            (at(bx0 + x - 1, by0 + y) + 2 * at(bx0 + x, by0 + y) + at(bx0 + x + 1, by0 + y)) / 4;
+      for (let y = 0; y < bh; y++)
+        for (let x = 0; x < bw; x++) {
+          const up = y > 0 ? tmpRow[(y - 1) * bw + x] : 0;
+          const dn = y + 1 < bh ? tmpRow[(y + 1) * bw + x] : 0;
+          smooth[y * bw + x] = (up + 2 * tmpRow[y * bw + x] + dn) / 4;
+        }
+    }
+    const sample = (ax: number, ay: number) => {
+      const x = ax - bx0, y = ay - by0;
+      return x >= 0 && y >= 0 && x < bw && y < bh ? smooth[y * bw + x] : 0;
+    };
     for (let Y = 0; Y < MH; Y++) {
       const ay = (Y0 + Y + 0.5) / f - 0.5;
       const y0 = Math.floor(ay), fy = ay - y0;

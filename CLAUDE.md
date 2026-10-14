@@ -26,7 +26,10 @@ npm run build   # wajib lolos sebelum commit
   warna datar ditolak; area diterima "tumbuh" ke piksel sisa yang cocok; urutan path = luas fillMask.
   Penggabungan tetangga butuh ΔE kecil pada gambar ter-blur DAN asli (dua warna datar mirip ≠ gradien).
 - `src/lib/colorSnapping.ts` — palet: warna dianggap berbeda bila ΔE76 ≥ `PALETTE_MIN_DELTA_E` (6);
-  `snapEdgesToLocalColors` membatasi piksel anti-aliasing ke warna yang ada di sekitarnya (anti-halo).
+  `snapEdgesToLocalColors` membatasi piksel anti-aliasing ke warna yang ada di sekitarnya (anti-halo);
+  piksel tepi yang lebih mirip latar transparan (area gradien/background) dibuat transparan, dan piksel
+  "yakin" hanya dihitung bila warnanya juga ada sebagai warna datar di dekatnya (anti bingkai krem).
+  Default kurva: spline (huruf/angka bulat halus); preset logo/flat tetap polygon.
   Resolusi kerja maks 3200 px; filter bintik diskalakan dengan faktor upscale (`scaledSpeckle`).
 - `src/lib/vtracerOptions.ts` — `layerDifference: 2` WAJIB: bawaan vtracer (16) menggabungkan nuansa
   gelap yang sudah dipisah palet (ban hitam ↔ fender abu).

@@ -487,6 +487,43 @@ export function snapEdgesToLocalColors(
   // (mis. inti huruf putih yang tipis). Dipertahankan, dan ikut menjadi acuan tetangga — supaya
   // garis/huruf tipis tidak terkikis.
   const CONFIDENT_DIST_SQ = 2500;
+  // …tetapi hanya bila warna itu juga benar-benar ada sebagai warna datar di sekitarnya (sel grid
+  // ±radius*4). Tanpa syarat ini, campuran putih-oranye di tepi huruf yang kebetulan mirip warna lain
+  // di palet (mis. krem isolasi kardus) ikut "yakin" dan menjadi garis tepi krem.
+  const colorIndex = new Map<number, number>();
+  for (let idx = 0; idx < total; idx++) {
+    const p = idx * 4;
+    if (data[p + 3] < 30) continue;
+    const packed = (data[p] << 16) | (data[p + 1] << 8) | data[p + 2];
+    if (!colorIndex.has(packed) && colorIndex.size < 64) colorIndex.set(packed, colorIndex.size);
+  }
+  const cell = Math.max(4, radius * 4);
+  const gw = Math.ceil(width / cell), gh = Math.ceil(height / cell);
+  const presLo = new Uint32Array(gw * gh), presHi = new Uint32Array(gw * gh);
+  for (let idx = 0; idx < total; idx++) {
+    if (edgeMask[idx]) continue;
+    const p = idx * 4;
+    if (data[p + 3] < 30) continue;
+    const ci = colorIndex.get((data[p] << 16) | (data[p + 1] << 8) | data[p + 2]);
+    if (ci === undefined) continue;
+    const g = Math.floor((idx / width) / cell) * gw + Math.floor((idx % width) / cell);
+    if (ci < 32) presLo[g] |= 1 << ci;
+    else presHi[g] |= 1 << (ci - 32);
+  }
+  const presentNearby = (x: number, y: number, ci: number): boolean => {
+    const gx = Math.floor(x / cell), gy = Math.floor(y / cell);
+    for (let dy = -1; dy <= 1; dy++) {
+      const yy = gy + dy;
+      if (yy < 0 || yy >= gh) continue;
+      for (let dx = -1; dx <= 1; dx++) {
+        const xx = gx + dx;
+        if (xx < 0 || xx >= gw) continue;
+        const g = yy * gw + xx;
+        if (ci < 32 ? presLo[g] & (1 << ci) : presHi[g] & (1 << (ci - 32))) return true;
+      }
+    }
+    return false;
+  };
   const reference = new Uint8Array(total);
   for (let idx = 0; idx < total; idx++) {
     const p = idx * 4;
@@ -496,7 +533,9 @@ export function snapEdgesToLocalColors(
       continue;
     }
     const d = colorDistanceSq(original[p], original[p + 1], original[p + 2], data[p], data[p + 1], data[p + 2]);
-    if (d < CONFIDENT_DIST_SQ) reference[idx] = 1;
+    if (d >= CONFIDENT_DIST_SQ) continue;
+    const ci = colorIndex.get((data[p] << 16) | (data[p + 1] << 8) | data[p + 2]);
+    if (ci !== undefined && presentNearby(idx % width, (idx / width) | 0, ci)) reference[idx] = 1;
   }
 
   const out = new Uint8ClampedArray(data);
@@ -507,6 +546,25 @@ export function snapEdgesToLocalColors(
       if (reference[idx] || !edgeMask[idx]) continue;
       const p = idx * 4;
       if (data[p + 3] < 30) continue;
+      const or = original[p], og = original[p + 1], ob = original[p + 2];
+      // Latar transparan di dekatnya (area gradien yang dilubangi, atau background yang dihapus):
+      // warna aslinya jadi kandidat "transparan". Bila piksel tepi lebih mirip latar daripada warna
+      // objek, ia dibuat transparan → batas huruf jatuh tepat di tengah anti-aliasing, tanpa bingkai.
+      // Radius 2 px agar selalu tertutup fillMask gradien (dilatasi 2 px) di bawahnya.
+      let tr = 0, tg = 0, tb = 0, tn = 0;
+      for (let dy = -2; dy <= 2; dy++) {
+        const yy = y + dy;
+        if (yy < 0 || yy >= height) continue;
+        for (let dx = -2; dx <= 2; dx++) {
+          const xx = x + dx;
+          if (xx < 0 || xx >= width) continue;
+          const j = (yy * width + xx) * 4;
+          if (data[j + 3] >= 30) continue;
+          tr += original[j]; tg += original[j + 1]; tb += original[j + 2]; tn++;
+        }
+      }
+      const dT = tn > 0 ? colorDistanceSq(or, og, ob, tr / tn, tg / tn, tb / tn) : Infinity;
+      let decided = false;
       for (let pass = 0; pass < 2; pass++) {
         const r = pass === 0 ? radius : radius * 2;
         cand.length = 0;
@@ -524,7 +582,6 @@ export function snapEdgesToLocalColors(
           }
         }
         if (cand.length === 0) continue;
-        const or = original[p], og = original[p + 1], ob = original[p + 2];
         let best = cand[0];
         let bestD = Infinity;
         for (const c of cand) {
@@ -534,10 +591,18 @@ export function snapEdgesToLocalColors(
             best = c;
           }
         }
-        out[p] = (best >> 16) & 255;
-        out[p + 1] = (best >> 8) & 255;
-        out[p + 2] = best & 255;
+        decided = true;
+        if (dT < bestD) {
+          out[p + 3] = 0;
+        } else {
+          out[p] = (best >> 16) & 255;
+          out[p + 1] = (best >> 8) & 255;
+          out[p + 2] = best & 255;
+        }
         break;
+      }
+      if (!decided && dT < colorDistanceSq(or, og, ob, data[p], data[p + 1], data[p + 2])) {
+        out[p + 3] = 0;
       }
     }
   }
