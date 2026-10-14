@@ -642,12 +642,12 @@ export const SettingsBar: React.FC<SettingsBarProps> = ({
                 min="4"
                 max="20"
                 step="1"
-                value={config.gradientTolerance ?? 12}
+                value={config.gradientTolerance ?? 8}
                 onChange={(e) => onChange({ ...config, gradientTolerance: parseInt(e.target.value, 10) })}
                 className="w-24 accent-rose-600 cursor-pointer"
                 title="Galat rata-rata yang masih diterima. Lebih tinggi = lebih banyak area jadi gradient (lebih halus, tapi detail mirip warna bisa ikut tergabung). Lebih rendah = lebih ketat, sisanya jadi pita warna."
               />
-              <span className="font-mono font-bold text-rose-700 min-w-[20px]">{config.gradientTolerance ?? 12}</span>
+              <span className="font-mono font-bold text-rose-700 min-w-[20px]">{config.gradientTolerance ?? 8}</span>
               <span className="text-[10px] text-slate-500">(ketat ← → longgar)</span>
             </div>
 

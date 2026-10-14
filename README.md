@@ -140,7 +140,7 @@ npm run vendor:vtracer
 
 ## Catatan pemakaian
 
-- **Toleransi gradasi** (4–20, default 12): makin tinggi, makin banyak area yang dijadikan gradient (lebih halus),
+- **Toleransi gradasi** (4–20, default 8): makin tinggi, makin banyak area yang dijadikan gradient (lebih halus),
   tapi detail yang warnanya mirip bisa ikut tergabung. Makin rendah, makin ketat — sisanya jadi pita warna.
   Antrean menampilkan badge "N gradien · M pita" per gambar.
 - **Area putih**: buka preview → tab **Area Putih** → klik area → *Terapkan & Vektorisasi Ulang*.

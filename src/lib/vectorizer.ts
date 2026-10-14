@@ -322,7 +322,7 @@ export const DEFAULT_CONFIG: VectorizeConfig = {
   shadowMinLight: 170,
   // Gradasi warna → gradient vektor asli (cadangan: pita warna)
   detectGradients: true,
-  gradientTolerance: 12,
+  gradientTolerance: 8,
   epsGradientMode: 'shading',
   pathPrecision: 2,
   optimizeOutput: true,
@@ -630,7 +630,7 @@ export function loadImageToCanvas(
       let gradientRegions: GradientRegion[] = [];
       let gradientFallbackCount = 0;
       if (withGradients && config.detectGradients !== false) {
-        const det = detectGradientRegions(workingImageData, { maxRmse: config.gradientTolerance ?? 12 });
+        const det = detectGradientRegions(workingImageData, { maxRmse: config.gradientTolerance ?? 8 });
         gradientRegions = det.regions;
         gradientFallbackCount = det.fallbackCount;
         punchGradientRegions(workingImageData, gradientRegions);

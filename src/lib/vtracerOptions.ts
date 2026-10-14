@@ -29,6 +29,9 @@ export function buildVtracerOptions(
     lengthThreshold: cfg.lengthThreshold ?? (isPolygon ? 10 : 4),
     pathPrecision: cfg.pathPrecision ?? 2,
     maxColors: Math.max(2, Math.min(64, effectiveColorCount)),
+    // Warna sudah dirapikan oleh color snapping; bawaan vtracer (16) menggabungkan lagi nuansa
+    // yang mirip (mis. ban hitam #25282D dengan fender #2D3A41) sehingga detail gelap hilang.
+    layerDifference: cfg.layerDifference ?? 2,
   };
 
   if (cfg.lockedPalette && Array.isArray(cfg.lockedPalette) && cfg.lockedPalette.length > 0) {

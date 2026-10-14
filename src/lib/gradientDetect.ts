@@ -63,7 +63,7 @@ export interface GradientDetectOptions {
   maxRmse?: number;
   /** Luas minimum area (fraksi dari piksel tidak transparan). Default 0.0015. */
   minAreaFraction?: number;
-  /** Sisi terpanjang resolusi analisis. Default 1400. */
+  /** Sisi terpanjang resolusi analisis. Default 1700 (≈ resolusi asli gambar ±1400 px). */
   analysisMaxDim?: number;
   /** Jumlah area gradien maksimum per gambar. Default 96. */
   maxRegions?: number;
@@ -409,7 +409,7 @@ export function detectGradientRegions(img: Pixels, opts: GradientDetectOptions =
   const maxRmse = opts.maxRmse ?? 9;
   const minAreaFraction = opts.minAreaFraction ?? 0.0015;
   const maxRegions = opts.maxRegions ?? 96;
-  const A = downsample(img, opts.analysisMaxDim ?? 1400);
+  const A = downsample(img, opts.analysisMaxDim ?? 1700);
   const { data, w, h, f } = A;
   const total = w * h;
 
@@ -561,8 +561,58 @@ export function detectGradientRegions(img: Pixels, opts: GradientDetectOptions =
       if (Math.abs(next - thr) < 0.25) break;
       thr = next;
     }
+    // Awal: belah berdasarkan warna (2-means). Lalu k-plane: setiap piksel dipindah ke model
+    // gradasi linear (warna = a + b·x + c·y per kanal) yang paling cocok, beberapa iterasi — sehingga
+    // batas jatuh di rusuk tempat arah gradasi berubah (mis. muka depan vs muka kanan balok 3D),
+    // walau warnanya mirip di salah satu ujung.
+    const n = px.length;
+    const group = new Uint8Array(n);
+    for (let k = 0; k < n; k++) group[k] = sv[k] < thr ? 0 : 1;
+    const coefs = [new Float64Array(9), new Float64Array(9)];
+    for (let it = 0; it < 8; it++) {
+      let ok = true;
+      for (let g = 0; g < 2; g++) {
+        const AtA = new Float64Array(9);
+        const Atb = [new Float64Array(3), new Float64Array(3), new Float64Array(3)];
+        let cnt = 0;
+        for (let k = 0; k < n; k++) {
+          if (group[k] !== g) continue;
+          const p = px[k];
+          const row = [1, (p % w) / w, ((p / w) | 0) / w];
+          const i = p * 4;
+          for (let a = 0; a < 3; a++) {
+            for (let b = 0; b < 3; b++) AtA[a * 3 + b] += row[a] * row[b];
+            for (let c = 0; c < 3; c++) Atb[c][a] += row[a] * data[i + c];
+          }
+          cnt++;
+        }
+        if (cnt < 8) { ok = false; break; }
+        for (let c = 0; c < 3; c++) {
+          const sol = solve(AtA, Atb[c], 3);
+          if (!sol) { ok = false; break; }
+          coefs[g][c * 3] = sol[0]; coefs[g][c * 3 + 1] = sol[1]; coefs[g][c * 3 + 2] = sol[2];
+        }
+        if (!ok) break;
+      }
+      if (!ok) break;
+      let changed = 0;
+      for (let k = 0; k < n; k++) {
+        const p = px[k];
+        const x = (p % w) / w, y = ((p / w) | 0) / w;
+        const i = p * 4;
+        let e0 = 0, e1 = 0;
+        for (let c = 0; c < 3; c++) {
+          const d0 = data[i + c] - (coefs[0][c * 3] + coefs[0][c * 3 + 1] * x + coefs[0][c * 3 + 2] * y);
+          const d1 = data[i + c] - (coefs[1][c * 3] + coefs[1][c * 3 + 1] * x + coefs[1][c * 3 + 2] * y);
+          e0 += d0 * d0; e1 += d1 * d1;
+        }
+        const g = e0 <= e1 ? 0 : 1;
+        if (g !== group[k]) { group[k] = g; changed++; }
+      }
+      if (changed < n * 0.002) break;
+    }
     const idA = ++stampId, idB = ++stampId;
-    for (let k = 0; k < px.length; k++) stamp[px[k]] = sv[k] < thr ? idA : idB;
+    for (let k = 0; k < n; k++) stamp[px[k]] = group[k] === 0 ? idA : idB;
     let pushed = 0;
     for (const start of px) {
       const id = stamp[start];
