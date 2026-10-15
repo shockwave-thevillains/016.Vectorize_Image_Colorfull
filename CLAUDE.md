@@ -29,6 +29,9 @@ npm run build   # wajib lolos sebelum commit
   `snapEdgesToLocalColors` membatasi piksel anti-aliasing ke warna yang ada di sekitarnya (anti-halo);
   piksel tepi yang lebih mirip latar transparan (area gradien/background) dibuat transparan, dan piksel
   "yakin" hanya dihitung bila warnanya juga ada sebagai warna datar di dekatnya (anti bingkai krem).
+  Keputusan piksel tepi = unmixing dua warna acuan (atau warna + latar transparan), ambang 50%; tak
+  terjelaskan → garis tepi tipis mirip objek dilebur (RIM_MERGE), selain itu snapping global dipertahankan
+  (teks/garis emas tipis). Lalu `growTransparentSimilar` (2 px) dan `majorityFilter` 3×3 (smoothEdges).
   Default kurva: spline (huruf/angka bulat halus); preset logo/flat tetap polygon.
   Resolusi kerja maks 3200 px; filter bintik diskalakan dengan faktor upscale (`scaledSpeckle`).
 - `src/lib/vtracerOptions.ts` — `layerDifference: 2` WAJIB: bawaan vtracer (16) menggabungkan nuansa

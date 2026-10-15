@@ -12,6 +12,8 @@ import {
   applyColorSnapping,
   buildEdgeGradientMask,
   snapEdgesToLocalColors,
+  majorityFilter,
+  growTransparentSimilar,
   optimizeAndMergeSvg,
   hexToRgb,
 } from './colorSnapping';
@@ -653,6 +655,8 @@ export function loadImageToCanvas(
           edgeMask,
           Math.max(2, Math.min(5, Math.round(effectiveScale * 1.5)))
         );
+        growTransparentSimilar(workingImageData, preSnap, 2, 30);
+        if (config.smoothEdges !== false) majorityFilter(workingImageData, 2);
         rawColorCount = dominantPalette.rawColorCount;
         mergedColorCount = dominantPalette.mergedColorCount;
         snappedPalette = dominantPalette.map((c) => c.hex);

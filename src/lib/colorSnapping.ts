@@ -538,8 +538,15 @@ export function snapEdgesToLocalColors(
     if (ci !== undefined && presentNearby(idx % width, (idx / width) | 0, ci)) reference[idx] = 1;
   }
 
+  // Keputusan tiap piksel tepi: anggap warnanya campuran DUA warna acuan di sekitarnya (atau satu
+  // warna + latar transparan). Bila campuran itu menjelaskan warnanya, pilih ujung yang porsinya
+  // ≥ 50% → batas jatuh tepat di tengah anti-aliasing (tepi huruf halus, tanpa bingkai warna lain).
+  // Bila tidak bisa dijelaskan (mis. garis/teks tipis yang tak punya piksel inti datar), warna hasil
+  // snapping global dipertahankan supaya detail tipis tidak hilang.
+  const MIX_RESIDUAL = 30; // RGB euclid
+  const RIM_MERGE = 70;
   const out = new Uint8ClampedArray(data);
-  const cand: number[] = [];
+  const cr: number[] = [], cg: number[] = [], cb: number[] = [], ct: number[] = []; // ct: 1 = transparan
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
       const idx = y * width + x;
@@ -547,66 +554,157 @@ export function snapEdgesToLocalColors(
       const p = idx * 4;
       if (data[p + 3] < 30) continue;
       const or = original[p], og = original[p + 1], ob = original[p + 2];
-      // Latar transparan di dekatnya (area gradien yang dilubangi, atau background yang dihapus):
-      // warna aslinya jadi kandidat "transparan". Bila piksel tepi lebih mirip latar daripada warna
-      // objek, ia dibuat transparan → batas huruf jatuh tepat di tengah anti-aliasing, tanpa bingkai.
-      // Radius 2 px agar selalu tertutup fillMask gradien (dilatasi 2 px) di bawahnya.
+      cr.length = cg.length = cb.length = ct.length = 0;
       let tr = 0, tg = 0, tb = 0, tn = 0;
-      for (let dy = -2; dy <= 2; dy++) {
+      const r = radius;
+      for (let dy = -r; dy <= r; dy++) {
         const yy = y + dy;
         if (yy < 0 || yy >= height) continue;
-        for (let dx = -2; dx <= 2; dx++) {
+        for (let dx = -r; dx <= r; dx++) {
           const xx = x + dx;
           if (xx < 0 || xx >= width) continue;
-          const j = (yy * width + xx) * 4;
-          if (data[j + 3] >= 30) continue;
-          tr += original[j]; tg += original[j + 1]; tb += original[j + 2]; tn++;
+          const q = yy * width + xx;
+          const j = q * 4;
+          if (data[j + 3] < 30) {
+            if (Math.abs(dx) <= 2 && Math.abs(dy) <= 2) {
+              tr += original[j]; tg += original[j + 1]; tb += original[j + 2]; tn++;
+            }
+            continue;
+          }
+          if (!reference[q]) continue;
+          let dup = false;
+          for (let k = 0; k < cr.length; k++) {
+            if (cr[k] === data[j] && cg[k] === data[j + 1] && cb[k] === data[j + 2]) { dup = true; break; }
+          }
+          if (!dup && cr.length < 12) { cr.push(data[j]); cg.push(data[j + 1]); cb.push(data[j + 2]); ct.push(0); }
         }
       }
-      const dT = tn > 0 ? colorDistanceSq(or, og, ob, tr / tn, tg / tn, tb / tn) : Infinity;
-      let decided = false;
-      for (let pass = 0; pass < 2; pass++) {
-        const r = pass === 0 ? radius : radius * 2;
-        cand.length = 0;
-        for (let dy = -r; dy <= r; dy++) {
-          const yy = y + dy;
-          if (yy < 0 || yy >= height) continue;
-          for (let dx = -r; dx <= r; dx++) {
-            const xx = x + dx;
-            if (xx < 0 || xx >= width) continue;
-            const q = yy * width + xx;
-            if (!reference[q]) continue;
-            const j = q * 4;
-            const packed = (data[j] << 16) | (data[j + 1] << 8) | data[j + 2];
-            if (!cand.includes(packed)) cand.push(packed);
-          }
+      if (tn > 0) { cr.push(tr / tn); cg.push(tg / tn); cb.push(tb / tn); ct.push(1); }
+      const n = cr.length;
+      if (n === 0) continue;
+
+      // residu & pilihan terbaik dari semua pasangan (dan warna tunggal)
+      let bestRes = Infinity, bestK = -1;
+      let nearOpaque = Infinity, nearOpaqueK = -1;
+      for (let i = 0; i < n; i++) {
+        const d = Math.hypot(or - cr[i], og - cg[i], ob - cb[i]);
+        if (d < bestRes) { bestRes = d; bestK = i; }
+        if (ct[i] === 0 && d < nearOpaque) { nearOpaque = d; nearOpaqueK = i; }
+        for (let j = i + 1; j < n; j++) {
+          const ux = cr[j] - cr[i], uy = cg[j] - cg[i], uz = cb[j] - cb[i];
+          const L2 = ux * ux + uy * uy + uz * uz;
+          if (L2 < 1) continue;
+          let t = ((or - cr[i]) * ux + (og - cg[i]) * uy + (ob - cb[i]) * uz) / L2;
+          if (t < 0 || t > 1) continue; // di luar segmen → sudah tercakup warna tunggal
+          const res = Math.hypot(or - (cr[i] + t * ux), og - (cg[i] + t * uy), ob - (cb[i] + t * uz));
+          if (res < bestRes) { bestRes = res; bestK = t < 0.5 ? i : j; }
         }
-        if (cand.length === 0) continue;
-        let best = cand[0];
-        let bestD = Infinity;
-        for (const c of cand) {
-          const d = colorDistanceSq(or, og, ob, (c >> 16) & 255, (c >> 8) & 255, c & 255);
-          if (d < bestD) {
-            bestD = d;
-            best = c;
-          }
-        }
-        decided = true;
-        if (dT < bestD) {
-          out[p + 3] = 0;
-        } else {
-          out[p] = (best >> 16) & 255;
-          out[p + 1] = (best >> 8) & 255;
-          out[p + 2] = best & 255;
-        }
-        break;
       }
-      if (!decided && dT < colorDistanceSq(or, og, ob, data[p], data[p + 1], data[p + 2])) {
+      if (bestRes > MIX_RESIDUAL) {
+        // Garis tepi tipis yang sedikit lebih gelap/terang dari objek di sebelahnya (efek penajaman
+        // gambar sumber) → lebur ke warna objek itu. Warna yang jauh berbeda dari semua tetangga
+        // (teks/garis tipis) → pertahankan snapping global.
+        if (nearOpaque > RIM_MERGE) continue;
+        bestK = nearOpaqueK;
+      }
+      if (ct[bestK] === 1) {
         out[p + 3] = 0;
+      } else {
+        out[p] = cr[bestK];
+        out[p + 1] = cg[bestK];
+        out[p + 2] = cb[bestK];
       }
     }
   }
   data.set(out);
+}
+
+/**
+ * Perluas area transparan (lubang gradien / background yang dihapus) ke piksel opak di tepinya yang
+ * warna ASLINYA hampir sama dengan warna asli area transparan di sebelahnya. Membersihkan serpihan
+ * warna datar yang tertinggal di pinggir huruf bergradasi. Maks. `steps` piksel — tetap di dalam
+ * fillMask gradien (dilatasi 2 px) sehingga tidak membuat lubang.
+ */
+export function growTransparentSimilar(
+  imageData: ImageData,
+  original: Uint8ClampedArray,
+  steps = 2,
+  maxDist = 30
+): void {
+  const { width, height, data } = imageData;
+  for (let it = 0; it < steps; it++) {
+    const clear: number[] = [];
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const p = (y * width + x) * 4;
+        if (data[p + 3] < 30) continue;
+        let sr = 0, sg = 0, sb = 0, n = 0;
+        for (let dy = -1; dy <= 1; dy++) {
+          const yy = y + dy;
+          if (yy < 0 || yy >= height) continue;
+          for (let dx = -1; dx <= 1; dx++) {
+            const xx = x + dx;
+            if (xx < 0 || xx >= width || (dx === 0 && dy === 0)) continue;
+            const j = (yy * width + xx) * 4;
+            if (data[j + 3] >= 30) continue;
+            sr += original[j]; sg += original[j + 1]; sb += original[j + 2]; n++;
+          }
+        }
+        if (n < 2) continue;
+        const d = Math.hypot(original[p] - sr / n, original[p + 1] - sg / n, original[p + 2] - sb / n);
+        if (d <= maxDist) clear.push(p);
+      }
+    }
+    if (clear.length === 0) break;
+    for (const p of clear) data[p + 3] = 0;
+  }
+}
+
+/**
+ * Filter mayoritas (mode 3×3) pada peta warna hasil snapping: piksel diganti warna yang menguasai
+ * ≥ 5 dari 9 piksel di sekitarnya. Menghaluskan tangga/gerigi 1 piksel di tepi huruf & bentuk (dan
+ * membuang bintik), tanpa mengikis garis selebar ≥ 2 piksel. Transparan dihitung sebagai "warna".
+ */
+export function majorityFilter(imageData: ImageData, passes = 2): void {
+  const { width, height, data } = imageData;
+  const keyAt = (j: number) =>
+    data[j + 3] < 30 ? -1 : (data[j] << 16) | (data[j + 1] << 8) | data[j + 2];
+  const keys = new Int32Array(9);
+  const counts = new Int32Array(9);
+  for (let pass = 0; pass < passes; pass++) {
+    const out = new Uint8ClampedArray(data);
+    let changed = 0;
+    for (let y = 1; y < height - 1; y++) {
+      for (let x = 1; x < width - 1; x++) {
+        const p = (y * width + x) * 4;
+        let n = 0;
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            const k = keyAt(p + (dy * width + dx) * 4);
+            let f = -1;
+            for (let i = 0; i < n; i++) if (keys[i] === k) { f = i; break; }
+            if (f >= 0) counts[f]++;
+            else { keys[n] = k; counts[n] = 1; n++; }
+          }
+        }
+        let bi = 0;
+        for (let i = 1; i < n; i++) if (counts[i] > counts[bi]) bi = i;
+        if (counts[bi] < 5) continue;
+        const own = keyAt(p);
+        if (keys[bi] === own) continue;
+        const k = keys[bi];
+        changed++;
+        if (k === -1) { out[p + 3] = 0; continue; }
+        // sumber warna: ambil dari tetangga yang ber-key sama (agar alpha ikut benar)
+        out[p] = (k >> 16) & 255;
+        out[p + 1] = (k >> 8) & 255;
+        out[p + 2] = k & 255;
+        out[p + 3] = 255;
+      }
+    }
+    data.set(out);
+    if (changed === 0) break;
+  }
 }
 
 /**

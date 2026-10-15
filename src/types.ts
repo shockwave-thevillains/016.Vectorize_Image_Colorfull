@@ -57,6 +57,7 @@ export interface VectorizeConfig {
   removeShadow?: boolean; // default false = bayangan dipertahankan
   shadowMinLight?: number; // Kecerahan minimum piksel bayangan yang ikut dihapus (0..255, default 170)
   // Gradasi warna → gradient vektor asli
+  smoothEdges?: boolean; // Filter mayoritas 3×3 sebelum tracing (tepi huruf halus), default true
   detectGradients?: boolean; // default true
   gradientTolerance?: number; // RMSE maksimum (0..255) agar model gradien diterima, default 9
   epsGradientMode?: EpsGradientMode; // 'shading' (Level 3, default) | 'bands' (pita warna, Level 2)

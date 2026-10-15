@@ -339,12 +339,9 @@ export function defringeWhiteEdges(
       } else if (alpha < 0.97) {
         const a = Math.min(1, alpha);
         const clamp = (v: number) => Math.max(0, Math.min(255, Math.round(v)));
-        toRecolor.push([
-          p,
-          clamp(255 - (255 - r) / a),
-          clamp(255 - (255 - g) / a),
-          clamp(255 - (255 - b) / a),
-        ]);
+        // Pakai warna objek di sekitarnya (bukan ekstrapolasi "unmix"), supaya tepi tidak
+        // berubah lebih gelap dari objeknya (cincin merah tua di tepi huruf merah).
+        toRecolor.push([p, clamp(fr), clamp(fg), clamp(fb)]);
       }
     }
 
