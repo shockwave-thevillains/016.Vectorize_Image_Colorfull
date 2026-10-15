@@ -14,6 +14,9 @@ import {
   snapEdgesToLocalColors,
   majorityFilter,
   growTransparentSimilar,
+  mergeThinRims,
+  unifyGlyphColors,
+  widenThinStrokes,
   optimizeAndMergeSvg,
   hexToRgb,
 } from './colorSnapping';
@@ -656,7 +659,10 @@ export function loadImageToCanvas(
           Math.max(2, Math.min(5, Math.round(effectiveScale * 1.5)))
         );
         growTransparentSimilar(workingImageData, preSnap, 2, 30);
+        mergeThinRims(workingImageData, Math.max(1.5, effectiveScale * 0.9), 70);
+        unifyGlyphColors(workingImageData, effectiveScale);
         if (config.smoothEdges !== false) majorityFilter(workingImageData, 2);
+        widenThinStrokes(workingImageData, preSnap, effectiveScale);
         rawColorCount = dominantPalette.rawColorCount;
         mergedColorCount = dominantPalette.mergedColorCount;
         snappedPalette = dominantPalette.map((c) => c.hex);

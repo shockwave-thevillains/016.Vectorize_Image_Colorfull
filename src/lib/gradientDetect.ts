@@ -407,8 +407,8 @@ function find(parent: Int32Array, x: number): number {
 
 export function detectGradientRegions(img: Pixels, opts: GradientDetectOptions = {}): GradientDetectResult {
   const maxRmse = opts.maxRmse ?? 9;
-  const minAreaFraction = opts.minAreaFraction ?? 0.0015;
-  const maxRegions = opts.maxRegions ?? 96;
+  const minAreaFraction = opts.minAreaFraction ?? 0.0005;
+  const maxRegions = opts.maxRegions ?? 160;
   const A = downsample(img, opts.analysisMaxDim ?? 1700);
   const { data, w, h, f } = A;
   const total = w * h;

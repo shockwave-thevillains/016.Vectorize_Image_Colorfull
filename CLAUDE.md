@@ -31,7 +31,15 @@ npm run build   # wajib lolos sebelum commit
   "yakin" hanya dihitung bila warnanya juga ada sebagai warna datar di dekatnya (anti bingkai krem).
   Keputusan piksel tepi = unmixing dua warna acuan (atau warna + latar transparan), ambang 50%; tak
   terjelaskan → garis tepi tipis mirip objek dilebur (RIM_MERGE), selain itu snapping global dipertahankan
-  (teks/garis emas tipis). Lalu `growTransparentSimilar` (2 px) dan `majorityFilter` 3×3 (smoothEdges).
+  (teks/garis emas tipis); tanpa acuan dekat (goresan 1 px) dicari ±3×radius, warna jauh dipakai hanya
+  bila lebih dekat ke warna asli daripada semua acuan dekat. Lalu `growTransparentSimilar` (2 px),
+  `mergeThinRims` (halo tipis penajaman JPEG dilebur ke objek tebal bila terjepit objek ↔ latar yang
+  berbeda — garis di antara dua bidang sewarna, mis. kontak chip, dipertahankan), `unifyGlyphColors`
+  (huruf kecil sekata: warna minoritas netral/perak → warna mayoritas, mis. emas pucat), `majorityFilter`
+  3×3 (smoothEdges; goresan 1 px kontras dilindungi), lalu `widenThinStrokes`: goresan 1–2 px kontras
+  dipertebal jadi 3 px karena vtracer membuang bentuk ≤ 2 px (huruf "I" hilang) — hanya bila warnanya
+  juga ada sebagai bidang tebal di dekatnya dan kedua sisinya latar yang sama.
+  Gradasi: `minAreaFraction` 0.0005, `maxRegions` 160 (angka/huruf kecil bergradasi ikut terdeteksi).
   Default kurva: spline (huruf/angka bulat halus); preset logo/flat tetap polygon.
   Resolusi kerja maks 3200 px; filter bintik diskalakan dengan faktor upscale (`scaledSpeckle`).
 - `src/lib/vtracerOptions.ts` — `layerDifference: 2` WAJIB: bawaan vtracer (16) menggabungkan nuansa
