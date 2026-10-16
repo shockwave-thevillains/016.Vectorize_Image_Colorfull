@@ -4,6 +4,8 @@
  * 1. Semua piksel putih (≥ toleransi) dikelompokkan menjadi AREA terhubung (4-arah).
  *    - Area yang menyentuh tepi gambar  = background luar  → default DIHAPUS.
  *    - Area tertutup di tengah objek   = putih dalam      → default mengikuti `keepInnerWhite`.
+ *    - Area tertutup yang sebenarnya background tembus (`seeThrough`, mis. di antara ban truk)
+ *      → default DIHAPUS.
  * 2. Pengguna bisa mengklik area di preview untuk membalik keputusan per area. Pilihan disimpan sebagai
  *    titik ternormalisasi (0..1) — bukan ID area — sehingga tetap valid di resolusi mana pun
  *    (preview memakai resolusi asli, pipeline memakai resolusi kerja hasil upscale).
@@ -16,6 +18,11 @@ export interface WhiteRegionInfo {
   id: number;
   area: number;
   touchesBorder: boolean;
+  /**
+   * Area tertutup yang sebenarnya background yang "terlihat tembus" (mis. putih di antara ban truk,
+   * tertutup garis jalan tipis di bawahnya) — default dihapus seperti background luar.
+   */
+  seeThrough: boolean;
   minX: number;
   minY: number;
   maxX: number;
@@ -67,6 +74,7 @@ export function labelWhiteRegions(img: Pixels, tol: number): WhiteRegionMap {
       id,
       area: 0,
       touchesBorder: false,
+      seeThrough: false,
       minX: width,
       minY: height,
       maxX: 0,
@@ -109,7 +117,119 @@ export function labelWhiteRegions(img: Pixels, tol: number): WhiteRegionMap {
     regions.push(info);
   }
 
-  return { width, height, labels, regions };
+  const map = { width, height, labels, regions };
+  markSeeThroughRegions(map);
+  return map;
+}
+
+/**
+ * Tandai area putih tertutup yang sebenarnya background tembus pandang. Cirinya: sebagian tepinya
+ * (15–85%) dibatasi penghalang TIPIS (≤ 2% sisi gambar, mis. garis jalan) yang di baliknya langsung
+ * background, sisanya dibatasi objek tebal (badan truk, ban), dan areanya besar. Putih milik objek
+ * tidak terkena: dikelilingi bagian tebal (cincin putih target, teks putih di kotak merah), seluruhnya
+ * oleh garis tipis (balon kata, teks bergaris tepi), atau kecil (huruf putih di pita merah).
+ * Putaran berikutnya: celah kecil pada penghalang tipis yang sama (segitiga di antara ban ganda) dan
+ * area di balik penghalang tipis dari area tembus (celah sempit antara sasis dan batang diagonal).
+ */
+function markSeeThroughRegions(map: WhiteRegionMap): void {
+  const { width: w, height: h, labels, regions } = map;
+  const total = w * h;
+  const T = Math.max(4, Math.round(0.02 * Math.max(w, h)));
+  const dist = new Int32Array(total);
+  const queue = new Int32Array(total);
+  const pass = (isSource: (r: WhiteRegionInfo) => boolean, minFrac: number): boolean => {
+    dist.fill(1 << 29);
+    let qh = 0, qt = 0;
+    for (let p = 0; p < total; p++) {
+      const l = labels[p];
+      if (l >= 0 && isSource(regions[l])) { dist[p] = 0; queue[qt++] = p; }
+    }
+    if (qt === 0) return false;
+    // jarak (jumlah piksel bukan-putih) dari sumber, hanya menembus piksel bukan-putih
+    while (qh < qt) {
+      const p = queue[qh++];
+      const d = dist[p];
+      if (d >= T) continue;
+      const x = p % w;
+      const nbs = [x > 0 ? p - 1 : -1, x + 1 < w ? p + 1 : -1, p >= w ? p - w : -1, p + w < total ? p + w : -1];
+      for (const n of nbs) {
+        if (n < 0 || labels[n] >= 0 || dist[n] <= d + 1) continue;
+        dist[n] = d + 1;
+        queue[qt++] = n;
+      }
+    }
+    const boundary = new Int32Array(regions.length);
+    const thin = new Int32Array(regions.length);
+    for (let p = 0; p < total; p++) {
+      const l = labels[p];
+      if (l < 0) continue;
+      const r = regions[l];
+      if (r.touchesBorder || r.seeThrough) continue;
+      const x = p % w;
+      const nbs = [x > 0 ? p - 1 : -1, x + 1 < w ? p + 1 : -1, p >= w ? p - w : -1, p + w < total ? p + w : -1];
+      let isB = false, isT = false;
+      for (const n of nbs) {
+        if (n < 0 || labels[n] >= 0) continue;
+        isB = true;
+        if (dist[n] <= T) isT = true;
+      }
+      if (isB) { boundary[l]++; if (isT) thin[l]++; }
+    }
+    let found = false;
+    const minArea = minFrac * total;
+    for (const r of regions) {
+      if (r.touchesBorder || r.seeThrough || r.area < minArea || boundary[r.id] === 0) continue;
+      const f = thin[r.id] / boundary[r.id];
+      if (f >= 0.15 && f <= 0.85) { r.seeThrough = true; found = true; }
+    }
+    return found;
+  };
+  const firstIds = new Set<number>();
+  if (!pass((r) => r.touchesBorder, 0.005)) return;
+  for (const r of regions) if (r.seeThrough) firstIds.add(r.id);
+  // Putaran ketiga: celah kecil yang tertutup penghalang tipis YANG SAMA (mis. segitiga putih di antara
+  // ban ganda, di atas garis jalan yang sama) ikut ditandai, berapa pun luasnya (≥ 0.01%).
+  pass((r) => r.touchesBorder, 1);
+  const nbsOf = (p: number) => {
+    const x = p % w;
+    return [x > 0 ? p - 1 : -1, x + 1 < w ? p + 1 : -1, p >= w ? p - w : -1, p + w < total ? p + w : -1];
+  };
+  const barrier = new Uint8Array(total);
+  let qh = 0, qt = 0;
+  for (let p = 0; p < total; p++) {
+    if (labels[p] >= 0 || dist[p] > T) continue;
+    if (nbsOf(p).some((n) => n >= 0 && labels[n] >= 0 && firstIds.has(labels[n]))) { barrier[p] = 1; queue[qt++] = p; }
+  }
+  while (qh < qt) {
+    const p = queue[qh++];
+    for (const n of nbsOf(p)) {
+      if (n < 0 || barrier[n] || labels[n] >= 0 || dist[n] > T) continue;
+      barrier[n] = 1;
+      queue[qt++] = n;
+    }
+  }
+  const boundary = new Int32Array(regions.length);
+  const thin = new Int32Array(regions.length);
+  const onBarrier = new Int32Array(regions.length);
+  for (let p = 0; p < total; p++) {
+    const l = labels[p];
+    if (l < 0 || regions[l].touchesBorder || regions[l].seeThrough) continue;
+    let isB = false, isT = false, isBar = false;
+    for (const n of nbsOf(p)) {
+      if (n < 0 || labels[n] >= 0) continue;
+      isB = true;
+      if (dist[n] <= T) isT = true;
+      if (barrier[n]) isBar = true;
+    }
+    if (isB) { boundary[l]++; if (isT) thin[l]++; if (isBar) onBarrier[l]++; }
+  }
+  for (const r of regions) {
+    const b = boundary[r.id];
+    if (r.touchesBorder || r.seeThrough || r.area < 0.0001 * total || b === 0) continue;
+    const f = thin[r.id] / b;
+    if (f >= 0.15 && f <= 0.85 && onBarrier[r.id] >= 0.1 * b) r.seeThrough = true;
+  }
+  pass((r) => firstIds.has(r.id), 0.0008);
 }
 
 /**
@@ -147,7 +267,7 @@ export function decideWhiteRemoval(
   overrides: WhiteRegionOverride[] = []
 ): void {
   for (const r of map.regions) {
-    r.removed = r.touchesBorder ? true : !keepInnerWhite;
+    r.removed = r.touchesBorder || r.seeThrough ? true : !keepInnerWhite;
     r.overridden = false;
   }
   for (const o of overrides) {

@@ -36,10 +36,12 @@ export function buildVtracerOptions(
 
   if (cfg.lockedPalette && Array.isArray(cfg.lockedPalette) && cfg.lockedPalette.length > 0) {
     options.palette = cfg.lockedPalette;
+  } else if (cfg.snappedPalette && Array.isArray(cfg.snappedPalette) && cfg.snappedPalette.length > 0) {
+    // Palet WAJIB diserahkan: tanpa palet vtracer menggabungkan klaster mirip (bingkai kaca teal
+    // tertelan badan kabin abu). Warna rata-rata klaster yang dipetakan vtracer (jarak RGB, mis.
+    // huruf perak → emas) dikoreksi oleh recolorSvgByVisibility setelah tracing.
+    options.palette = cfg.snappedPalette;
   }
-  // Palet hasil snapping sengaja TIDAK diserahkan ke vtracer: vtracer mencocokkan warna rata-rata
-  // klaster yang dilebur dengan jarak RGB (huruf perak → emas). Warna hasil dicocokkan ulang ke palet
-  // secara perseptual oleh recolorSvgByVisibility setelah tracing.
 
   return options;
 }

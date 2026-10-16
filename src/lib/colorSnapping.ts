@@ -8,6 +8,7 @@
  * 5. Straight lines becoming wavy or jagged (Polygon vs Spline modes).
  */
 
+import svgpath from 'svgpath';
 import { bakeTransformsWithSvgPath } from './svgTransformBaker';
 
 export interface RGBColor {
@@ -1221,13 +1222,17 @@ export function recolorSvgByVisibility(
     }
     return labs[best].hex;
   };
-  const re = /<path\b([^>]*?)\bd="([^"]+)"([^>]*?)fill="(#[0-9a-fA-F]{6})"/g;
-  const items: Array<{ start: number; end: number; pre: string; d: string; mid: string; hex: string }> = [];
+  // seluruh elemen path (self-closing) agar bisa dipecah menjadi beberapa path
+  const re = /<path\b([^>]*?)\bd="([^"]+)"([^>]*?)fill="(#[0-9a-fA-F]{6})"([^>]*?)\/>/g;
+  const items: Array<{ start: number; end: number; pre: string; d: string; mid: string; hex: string; post: string; groups: string[] }> = [];
   let m: RegExpExecArray | null;
   while ((m = re.exec(svg)) !== null) {
-    items.push({ start: m.index, end: m.index + m[0].length, pre: m[1], d: m[2], mid: m[3], hex: m[4] });
+    items.push({
+      start: m.index, end: m.index + m[0].length, pre: m[1], d: m[2], mid: m[3], hex: m[4], post: m[5],
+      groups: splitShapes(m[2]),
+    });
   }
-  const colors: string[] = items.map((it) => nearest(it.hex));
+  const colors: string[][] = items.map((it) => it.groups.map(() => nearest(it.hex)));
   const canvasOk = typeof document !== 'undefined' || typeof OffscreenCanvas !== 'undefined';
   if (indexMap && width > 0 && height > 0 && canvasOk && typeof Path2D !== 'undefined') {
     const covered = new Uint8Array(width * height);
@@ -1240,44 +1245,112 @@ export function recolorSvgByVisibility(
       return c;
     };
     for (let k = items.length - 1; k >= 0; k--) {
-      const bb = bbox(items[k].d);
-      if (!bb) continue;
-      const x0 = Math.max(0, Math.floor(bb[0])), y0 = Math.max(0, Math.floor(bb[1]));
-      const x1 = Math.min(width, Math.ceil(bb[2])), y1 = Math.min(height, Math.ceil(bb[3]));
-      const bw = x1 - x0, bh = y1 - y0;
-      if (bw <= 0 || bh <= 0) continue;
-      const canvas = mk(bw, bh);
-      const ctx = canvas.getContext('2d') as CanvasRenderingContext2D | null;
-      if (!ctx) continue;
-      ctx.translate(-x0, -y0);
-      ctx.fillStyle = '#000';
-      ctx.fill(new Path2D(items[k].d));
-      const px = ctx.getImageData(0, 0, bw, bh).data;
-      counts.fill(0);
-      let n = 0;
-      for (let y = 0; y < bh; y++) {
-        const row = (y0 + y) * width + x0;
-        for (let x = 0; x < bw; x++) {
-          if (px[(y * bw + x) * 4 + 3] < 128) continue;
-          const g = row + x;
-          if (covered[g]) continue;
-          covered[g] = 1;
-          const ci = indexMap[g];
-          if (ci < labs.length) { counts[ci]++; n++; }
+      items[k].groups.forEach((gd, gi) => {
+        const bb = bbox(gd);
+        if (!bb) return;
+        const x0 = Math.max(0, Math.floor(bb[0])), y0 = Math.max(0, Math.floor(bb[1]));
+        const x1 = Math.min(width, Math.ceil(bb[2])), y1 = Math.min(height, Math.ceil(bb[3]));
+        const bw = x1 - x0, bh = y1 - y0;
+        if (bw <= 0 || bh <= 0) return;
+        const canvas = mk(bw, bh);
+        const ctx = canvas.getContext('2d') as CanvasRenderingContext2D | null;
+        if (!ctx) return;
+        ctx.translate(-x0, -y0);
+        ctx.fillStyle = '#000';
+        ctx.fill(new Path2D(gd));
+        const px = ctx.getImageData(0, 0, bw, bh).data;
+        counts.fill(0);
+        let n = 0;
+        for (let y = 0; y < bh; y++) {
+          const row = (y0 + y) * width + x0;
+          for (let x = 0; x < bw; x++) {
+            if (px[(y * bw + x) * 4 + 3] < 128) continue;
+            const g = row + x;
+            if (covered[g]) continue;
+            covered[g] = 1;
+            const ci = indexMap[g];
+            if (ci < labs.length) { counts[ci]++; n++; }
+          }
         }
-      }
-      if (n >= 4) {
-        let top = 0;
-        for (let i = 1; i < labs.length; i++) if (counts[i] > counts[top]) top = i;
-        colors[k] = labs[top].hex;
-      }
+        if (n >= 4) {
+          let top = 0;
+          for (let i = 1; i < labs.length; i++) if (counts[i] > counts[top]) top = i;
+          colors[k][gi] = labs[top].hex;
+        }
+      });
     }
   }
   let out = '';
   let last = 0;
   items.forEach((it, k) => {
-    out += svg.slice(last, it.start) + `<path${it.pre}d="${it.d}"${it.mid}fill="${colors[k]}"`;
+    out += svg.slice(last, it.start);
+    const cs = colors[k];
+    if (cs.every((c) => c === cs[0])) {
+      out += `<path${it.pre}d="${it.d}"${it.mid}fill="${cs[0]}"${it.post}/>`;
+    } else {
+      // bentuk-bentuk terpisah dalam satu path ternyata berbeda warna → path terpisah, urutan sama
+      it.groups.forEach((gd, gi) => { out += `<path${it.pre}d="${gd}"${it.mid}fill="${cs[gi]}"${it.post}/>`; });
+    }
     last = it.end;
   });
   return out + svg.slice(last);
+}
+
+/**
+ * Pecah path majemuk vtracer menjadi bentuk-bentuk terpisah: tiap kontur luar beserta lubangnya.
+ * vtracer (mode palet) menggabungkan area terpisah yang sewarna ke dalam satu path, padahal warna
+ * yang benar bisa berbeda per area. Lubang = kontur berarah berlawanan dengan kontur terbesar,
+ * dipasangkan ke kontur luar terkecil yang memuatnya.
+ */
+function splitShapes(d: string): string[] {
+  let subs: string[];
+  try {
+    subs = svgpath(d).abs().toString().split(/(?=M)/).filter((x: string) => x.trim().length > 0);
+  } catch {
+    return [d];
+  }
+  if (subs.length < 2) return [d];
+  const info = subs.map((sp) => {
+    const pts: number[] = [];
+    svgpath(sp).iterate((seg: any[]) => {
+      if (seg.length >= 3) pts.push(seg[seg.length - 2], seg[seg.length - 1]);
+    });
+    let a = 0, x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    const n = pts.length / 2;
+    for (let i = 0; i < n; i++) {
+      const xa = pts[i * 2], ya = pts[i * 2 + 1];
+      const xb = pts[((i + 1) % n) * 2], yb = pts[((i + 1) % n) * 2 + 1];
+      a += xa * yb - xb * ya;
+      if (xa < x0) x0 = xa;
+      if (xa > x1) x1 = xa;
+      if (ya < y0) y0 = ya;
+      if (ya > y1) y1 = ya;
+    }
+    return { a: a / 2, bb: [x0, y0, x1, y1] };
+  });
+  let big = 0;
+  for (let i = 1; i < info.length; i++) if (Math.abs(info[i].a) > Math.abs(info[big].a)) big = i;
+  const outerSign = Math.sign(info[big].a) || 1;
+  const owner = info.map((_, i) => i);
+  for (let i = 0; i < info.length; i++) {
+    if (Math.sign(info[i].a) === outerSign) continue;
+    let best = -1, bestA = Infinity;
+    const hb = info[i].bb;
+    for (let j = 0; j < info.length; j++) {
+      if (Math.sign(info[j].a) !== outerSign) continue;
+      const ob = info[j].bb;
+      if (ob[0] <= hb[0] + 0.5 && ob[1] <= hb[1] + 0.5 && ob[2] >= hb[2] - 0.5 && ob[3] >= hb[3] - 0.5 && Math.abs(info[j].a) < bestA) {
+        bestA = Math.abs(info[j].a);
+        best = j;
+      }
+    }
+    if (best >= 0) owner[i] = best;
+  }
+  const groups = new Map<number, string[]>();
+  subs.forEach((sp, i) => {
+    const g = groups.get(owner[i]);
+    if (g) g.push(sp); else groups.set(owner[i], [sp]);
+  });
+  if (groups.size < 2) return [d];
+  return [...groups.values()].map((g) => g.join(''));
 }

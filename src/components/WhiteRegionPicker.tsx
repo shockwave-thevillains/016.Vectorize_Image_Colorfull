@@ -121,7 +121,7 @@ export const WhiteRegionPicker: React.FC<WhiteRegionPickerProps> = ({ imageSrc, 
     if (id < 0) return;
     const region = analysis.map.regions[id];
     const nextAction: WhiteRegionOverride['action'] = region.removed ? 'keep' : 'remove';
-    const defaultRemoved = region.touchesBorder ? true : !keepInnerWhite;
+    const defaultRemoved = region.touchesBorder || region.seeThrough ? true : !keepInnerWhite;
     // buang override lama untuk area yang sama, lalu tambah bila berbeda dari default
     const rest = overrides.filter((o) => regionAtPoint(analysis.map, o.x, o.y) !== id);
     if ((nextAction === 'remove') !== defaultRemoved) {
@@ -212,7 +212,7 @@ export const WhiteRegionPicker: React.FC<WhiteRegionPickerProps> = ({ imageSrc, 
         <div className="min-h-[34px] rounded-lg bg-slate-50 border border-slate-200 px-2 py-1.5 text-[11px]">
           {hovered ? (
             <span>
-              Area {hovered.touchesBorder ? 'background luar' : 'putih dalam'} · {hovered.area.toLocaleString('id-ID')} px ·{' '}
+              Area {hovered.touchesBorder ? 'background luar' : hovered.seeThrough ? 'background tembus' : 'putih dalam'} · {hovered.area.toLocaleString('id-ID')} px ·{' '}
               <strong className={hovered.removed ? 'text-rose-600' : 'text-emerald-700'}>
                 {hovered.removed ? 'dihapus' : 'dipertahankan'}
               </strong>

@@ -17,6 +17,10 @@ npm run build   # wajib lolos sebelum commit
   `applyPreset` sengaja TIDAK menimpa pengaturan background/area putih/bayangan.
 - `src/lib/whiteRegions.ts` — area putih terhubung, keputusan default + override klik
   (titik ternormalisasi 0..1, bukan ID area), bayangan (`removeShadow`), defringe halo putih.
+  `seeThrough`: area tertutup yang sebenarnya background tembus (putih di antara ban truk, tertutup garis
+  jalan) default dihapus — luas ≥ 0.5% dan 15–85% tepinya penghalang tipis (≤ 2% sisi gambar) dengan
+  background di baliknya; celah kecil pada penghalang yang sama dan area di balik penghalang tipis dari
+  area tembus ikut. Huruf putih di pita merah (kecil) / cincin putih (penghalang tebal) tetap.
   Dipakai pipeline (resolusi kerja) dan `WhiteRegionPicker` (resolusi asli) — harus tetap satu sumber.
 - `src/lib/gradientDetect.ts` — segmentasi + fit linear (arah dari bidang & dari kelengkungan) /
   radial-elips, profil multi-stop (RDP). Area diterima → `mask` dilubangi dari lapisan datar,
@@ -47,10 +51,12 @@ npm run build   # wajib lolos sebelum commit
   dipertebal jadi 3 px karena vtracer membuang bentuk ≤ 2 px (huruf "I" hilang) — hanya bila warnanya
   juga ada sebagai bidang tebal di dekatnya dan kedua sisinya latar yang sama.
   Gradasi: `minAreaFraction` 0.0002, `maxRegions` 160 (garis miring "%" dsb. ikut terdeteksi).
-  Palet TIDAK diserahkan ke vtracer (vtracer mencocokkan warna rata-rata klaster yang dilebur dengan
-  jarak RGB → huruf perak jadi emas). `recolorSvgByVisibility` merasterisasi tiap path dari atas ke
-  bawah dan memberi warna palet raster terbanyak di piksel yang benar-benar terlihat (Lab terdekat bila
-  tak ada). Mode magenta dikecualikan (path latar magenta harus tetap magenta untuk disaring).
+  Palet TETAP diserahkan ke vtracer (tanpa palet vtracer menggabungkan klaster mirip: bingkai kaca teal
+  truk tertelan kabin abu). Warna rata-rata klaster yang dipetakan vtracer bisa salah (huruf perak →
+  emas), jadi `recolorSvgByVisibility` memecah tiap path menjadi bentuk terpisah (kontur luar + lubang;
+  vtracer menggabungkan area sewarna yang berjauhan dalam satu path), merasterisasi dari atas ke bawah,
+  dan memberi tiap bentuk warna palet raster terbanyak di piksel yang benar-benar terlihat. Mode magenta
+  dikecualikan (path latar magenta harus tetap magenta untuk disaring).
   Default kurva: spline (huruf/angka bulat halus); preset logo/flat tetap polygon.
   Resolusi kerja maks 3200 px; filter bintik diskalakan dengan faktor upscale (`scaledSpeckle`).
 - `src/lib/vtracerOptions.ts` — `layerDifference: 2` WAJIB: bawaan vtracer (16) menggabungkan nuansa
