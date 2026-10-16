@@ -61,11 +61,11 @@ export interface GradientRegion {
 export interface GradientDetectOptions {
   /** Galat rata-rata maksimum (0..255) agar model gradien diterima. Default 9. */
   maxRmse?: number;
-  /** Luas minimum area (fraksi dari piksel tidak transparan). Default 0.0015. */
+  /** Luas minimum area (fraksi dari piksel tidak transparan). Default 0.0002. */
   minAreaFraction?: number;
   /** Sisi terpanjang resolusi analisis. Default 1700 (≈ resolusi asli gambar ±1400 px). */
   analysisMaxDim?: number;
-  /** Jumlah area gradien maksimum per gambar. Default 96. */
+  /** Jumlah area gradien maksimum per gambar. Default 160. */
   maxRegions?: number;
 }
 
@@ -80,6 +80,8 @@ type Pixels = { data: Uint8ClampedArray | Uint8Array; width: number; height: num
 const EDGE_T = 7; // ΔE langkah maksimum (gambar ter-blur) agar piksel bukan "tepi"
 const JOIN_T = 3.2; // ΔE maksimum antar tetangga (ter-blur) agar digabung
 const RAW_JOIN_T = 4.5; // ΔE maksimum antar tetangga (asli) — dua warna datar yang mirip TIDAK boleh menyatu
+const WITHIN_RATIO = 0.7; // model gradien kelompok harus menjelaskan ≥ 30% variasi di dalam bagian
+const DETAIL_T = 50; // selisih RGB dari prediksi gradien (resolusi kerja) agar piksel tetap detail datar
 const GROW_T = 18; // selisih warna maks. (RGB) agar piksel sisa diserap area gradien tetangganya
 const MAX_SPLIT_DEPTH = 3; // area gagal di-fit dipecah paling banyak 3 tingkat (≤ 8 sub-area)
 const RAW_EDGE_T = 8; // langkah ΔE asli di atas ini = tepi tajam
@@ -407,7 +409,7 @@ function find(parent: Int32Array, x: number): number {
 
 export function detectGradientRegions(img: Pixels, opts: GradientDetectOptions = {}): GradientDetectResult {
   const maxRmse = opts.maxRmse ?? 9;
-  const minAreaFraction = opts.minAreaFraction ?? 0.0005;
+  const minAreaFraction = opts.minAreaFraction ?? 0.0002;
   const maxRegions = opts.maxRegions ?? 160;
   const A = downsample(img, opts.analysisMaxDim ?? 1700);
   const { data, w, h, f } = A;
@@ -513,6 +515,11 @@ export function detectGradientRegions(img: Pixels, opts: GradientDetectOptions =
     if (opaque[p] && !edge[p]) compSize[find(parent, p)]++;
   }
   const minArea = Math.max(48, Math.round(minAreaFraction * opaqueCount));
+  // Peringatan "pita warna" hanya untuk area yang cukup besar untuk terlihat; detail kecil yang gagal
+  // di-fit (mis. bagian huruf) tetap di lapisan warna datar seperti biasa.
+  const reportArea = Math.max(minArea, Math.round(0.0015 * opaqueCount));
+  let fallbackCount = 0;
+  const noteFallback = (px: number[]) => { if (px.length >= reportArea) fallbackCount++; };
   const candIndex = new Int32Array(total).fill(-1);
   const candRoots: number[] = [];
   for (let p = 0; p < total; p++) {
@@ -535,12 +542,11 @@ export function detectGradientRegions(img: Pixels, opts: GradientDetectOptions =
     mean: Rgb;
   }
   const accepted: Accepted[] = [];
-  let fallbackCount = 0;
 
   // Antrean area: mulai dari komponen hasil segmentasi (terbesar dulu). Area yang gagal di-fit
   // dipecah menjadi sub-area berdasarkan warna lalu di-fit ulang (maks MAX_SPLIT_DEPTH tingkat),
   // sehingga gradasi rumit (mis. muka-muka balok 3D) menjadi beberapa gradien halus, bukan pita warna.
-  const queue: Array<{ px: number[]; depth: number }> = members
+  const queue: Array<{ px: number[]; depth: number; group?: boolean; parts?: number[][] }> = members
     .map((m) => ({ px: m, depth: 0 }))
     .sort((a, b) => b.px.length - a.px.length);
   const stamp = new Int32Array(total);
@@ -639,9 +645,57 @@ export function detectGradientRegions(img: Pixels, opts: GradientDetectOptions =
     return pushed > 0;
   };
 
+  // Area yang hampir datar (ditolak aturan "satu warna dominan"), disimpan untuk dicoba ulang
+  // sebagai KELOMPOK: mis. pad chip emas yang dipisah garis kontak tipis — tiap pad hampir datar,
+  // tetapi bersama-sama membentuk satu gradasi halus.
+  const nearFlat: Array<{ px: number[]; mean: Rgb }> = [];
+  /** Ada lompatan warna tajam antar-stop (> 6 RGB per piksel analisis)? */
+  const isSteep = (spec: GradientSpec): boolean => {
+    const m = spec.matrix;
+    const len = Math.max(Math.hypot(m[0], m[1]), Math.hypot(m[2], m[3]));
+    for (let k = 1; k < spec.stops.length; k++) {
+      const a = spec.stops[k - 1], b = spec.stops[k];
+      const dc = Math.hypot(a.color[0] - b.color[0], a.color[1] - b.color[1], a.color[2] - b.color[2]);
+      const dpx = Math.max(1e-6, (b.offset - a.offset) * len);
+      if (dc > 12 && dc / dpx > 6) return true;
+    }
+    return false;
+  };
+  /** Warna model gradien di piksel analisis p. */
+  const predictAt = (spec: GradientSpec, p: number, out: Float64Array) => {
+    const m = spec.matrix;
+    const x = (p % w) + 0.5, y = ((p / w) | 0) + 0.5;
+    const det = m[0] * m[3] - m[1] * m[2];
+    const dx = x - m[4], dy = y - m[5];
+    const qx = (m[3] * dx - m[2] * dy) / det;
+    const qy = (-m[1] * dx + m[0] * dy) / det;
+    evalStops(spec.stops, spec.type === 'linear' ? qx : Math.hypot(qx, qy), out);
+  };
+  /**
+   * Gradasi sejati juga terlihat DI DALAM tiap bagian kelompok (pad chip sedikit lebih terang di satu
+   * sisi). Ilustrasi datar (muka kotak, bumper) hanya berbeda ANTAR bagian; di dalam bagian warnanya
+   * rata, sehingga model tidak lebih baik dari warna rata-rata bagian itu → tolak.
+   */
+  const explainsWithinParts = (spec: GradientSpec, parts: number[][]): boolean => {
+    const pred = new Float64Array(3);
+    let eMean = 0, eModel = 0;
+    for (const part of parts) {
+      let r = 0, g = 0, b = 0;
+      for (const p of part) { r += data[p * 4]; g += data[p * 4 + 1]; b += data[p * 4 + 2]; }
+      r /= part.length; g /= part.length; b /= part.length;
+      for (const p of part) {
+        const i = p * 4;
+        eMean += (data[i] - r) ** 2 + (data[i + 1] - g) ** 2 + (data[i + 2] - b) ** 2;
+        predictAt(spec, p, pred);
+        eModel += (data[i] - pred[0]) ** 2 + (data[i + 1] - pred[1]) ** 2 + (data[i + 2] - pred[2]) ** 2;
+      }
+    }
+    return eModel <= eMean * WITHIN_RATIO;
+  };
+  const runQueue = () => {
   while (queue.length > 0) {
     if (accepted.length >= maxRegions) break;
-    const { px, depth } = queue.shift()!;
+    const { px, depth, group, parts } = queue.shift()!;
     const n = px.length;
 
     // Rata-rata & kovarians RGB
@@ -669,11 +723,15 @@ export function detectGradientRegions(img: Pixels, opts: GradientDetectOptions =
     }
     for (let k = 0; k < 9; k++) cov[k] /= n;
     const { v, lambda } = principalAxis(cov);
-    if (Math.sqrt(lambda) < 5) continue; // praktis warna datar → biarkan pipeline biasa
+    if (Math.sqrt(lambda) < 5) {
+      // praktis warna datar → biarkan pipeline biasa (tetap dicatat untuk percobaan kelompok)
+      if (!group) nearFlat.push({ px, mean: [mr, mg, mb] });
+      continue;
+    }
 
     // Area yang didominasi satu warna datar (mis. ban hitam + sedikit tepi) BUKAN gradien:
     // bila ≥ 55% piksel berada dekat warna terbanyak, serahkan ke lapisan warna datar.
-    {
+    if (!group) {
       const bins = new Map<number, number>();
       for (const p of px) {
         const i = p * 4;
@@ -687,7 +745,10 @@ export function detectGradientRegions(img: Pixels, opts: GradientDetectOptions =
       for (const [k, c] of bins) {
         if (Math.abs(((k >> 10) & 31) - mr0) <= 1 && Math.abs(((k >> 5) & 31) - mg0) <= 1 && Math.abs((k & 31) - mb0) <= 1) near += c;
       }
-      if (near / n >= 0.55) continue;
+      if (near / n >= 0.55) {
+        nearFlat.push({ px, mean: [mr, mg, mb] });
+        continue;
+      }
     }
 
     const S = Math.max(4, Math.max(maxX - minX, maxY - minY) / 2);
@@ -819,7 +880,7 @@ export function detectGradientRegions(img: Pixels, opts: GradientDetectOptions =
     }
 
     if (candidates.length === 0) {
-      if (!splitRegion(px, s, depth)) fallbackCount++;
+      if (!group && !splitRegion(px, s, depth)) noteFallback(px);
       continue;
     }
     const score = (c: ModelEval) => c.rmse + (c.edgeLike ? 1e6 : 0);
@@ -830,11 +891,67 @@ export function detectGradientRegions(img: Pixels, opts: GradientDetectOptions =
     if (lin && rad && rad.rmse < lin.rmse * 0.85) best = rad;
 
     if (best.span < 14) continue; // perubahan warna terlalu kecil → anggap datar
+    if (group && (isSteep(best.spec) || !explainsWithinParts(best.spec, parts!))) continue;
     if (best.edgeLike || best.rmse > maxRmse || best.badFraction > 0.05) {
-      if (!splitRegion(px, s, depth)) fallbackCount++;
+      if (!group && !splitRegion(px, s, depth)) noteFallback(px);
       continue;
     }
     accepted.push({ spec: best.spec, pixels: px, mean: [mr, mg, mb] });
+  }
+  };
+  runQueue();
+
+  // --- 4b. Kelompokkan area hampir-datar yang bertetangga (terpisah garis tipis ≤ 6 px analisis)
+  //         dan warnanya berdekatan, lalu fit satu gradien untuk gabungannya. Gagal fit (mis. muka balok datar
+  //         dengan tepi tajam → galat besar) → tetap warna datar.
+  {
+    const GROUP_MAX = Math.max(minArea * 24, Math.round(0.02 * opaqueCount));
+    const items = nearFlat.filter((it) => it.px.length <= GROUP_MAX);
+    if (items.length >= 2) {
+      const owner = new Int32Array(total).fill(-1);
+      items.forEach((it, k) => { for (const p of it.px) owner[p] = k; });
+      const gp = new Int32Array(items.length);
+      for (let k = 0; k < items.length; k++) gp[k] = k;
+      const gfind = (a: number): number => { while (gp[a] !== a) { gp[a] = gp[gp[a]]; a = gp[a]; } return a; };
+      const R = 6;
+      items.forEach((it, k) => {
+        for (const p of it.px) {
+          const x = p % w, y = (p / w) | 0;
+          // cukup piksel batas area
+          if (x > 0 && x + 1 < w && y > 0 && y + 1 < h &&
+              owner[p - 1] === k && owner[p + 1] === k && owner[p - w] === k && owner[p + w] === k) continue;
+          for (let dy = -R; dy <= R; dy++) {
+            const yy = y + dy;
+            if (yy < 0 || yy >= h) continue;
+            for (let dx = -R; dx <= R; dx++) {
+              const xx = x + dx;
+              if (xx < 0 || xx >= w) continue;
+              const o = owner[yy * w + xx];
+              if (o < 0 || o === k) continue;
+              const a = gfind(k), b = gfind(o);
+              if (a === b) continue;
+              const ma = it.mean, mb = items[o].mean;
+              if (Math.hypot(ma[0] - mb[0], ma[1] - mb[1], ma[2] - mb[2]) > 45) continue;
+              gp[a] = b;
+            }
+          }
+        }
+      });
+      const groups = new Map<number, number[]>();
+      items.forEach((_, k) => {
+        const g = gfind(k);
+        const arr = groups.get(g);
+        if (arr) arr.push(k); else groups.set(g, [k]);
+      });
+      for (const ks of groups.values()) {
+        if (ks.length < 2) continue;
+        const px: number[] = [];
+        for (const k of ks) for (const p of items[k].px) px.push(p);
+        if (px.length < minArea * 2) continue;
+        queue.push({ px, depth: MAX_SPLIT_DEPTH, group: true, parts: ks.map((k) => items[k].px) });
+      }
+      if (queue.length > 0) runQueue();
+    }
   }
 
   if (accepted.length === 0) return { regions: [], fallbackCount };
@@ -1036,12 +1153,52 @@ export function detectGradientRegions(img: Pixels, opts: GradientDetectOptions =
       }
     }
     const isOpaque = (X: number, Y: number) => img.data[((Y0 + Y) * img.width + X0 + X) * 4 + 3] >= OPAQUE;
+    // Detail tipis (mis. garis kontak chip 1 px) hilang di resolusi analysis dan ikut tertelan masker.
+    // Cek ulang di resolusi kerja: piksel yang warnanya jauh dari prediksi gradien tetap di lapisan
+    // warna datar — bila membentuk struktur (≥ minDetail px), bukan bintik derau JPEG.
+    const off = new Uint8Array(MW * MH);
+    {
+      const m = a.spec.matrix;
+      const det = m[0] * m[3] - m[1] * m[2];
+      const pr = new Float64Array(3);
+      for (let Y = 0; Y < MH; Y++) {
+        for (let X = 0; X < MW; X++) {
+          const k = Y * MW + X;
+          if (!raw[k] || !isOpaque(X, Y)) continue;
+          const dx = (X0 + X + 0.5) / f - m[4], dy = (Y0 + Y + 0.5) / f - m[5];
+          const qx = (m[3] * dx - m[2] * dy) / det, qy = (-m[1] * dx + m[0] * dy) / det;
+          evalStops(a.spec.stops, a.spec.type === 'linear' ? qx : Math.hypot(qx, qy), pr);
+          const i = ((Y0 + Y) * img.width + X0 + X) * 4;
+          if (Math.hypot(img.data[i] - pr[0], img.data[i + 1] - pr[1], img.data[i + 2] - pr[2]) > DETAIL_T) off[k] = 1;
+        }
+      }
+      const minDetail = Math.max(12, Math.round(3 * f * f));
+      const seen = new Uint8Array(MW * MH);
+      const st = new Int32Array(MW * MH);
+      for (let k0 = 0; k0 < MW * MH; k0++) {
+        if (!off[k0] || seen[k0]) continue;
+        let sp = 0;
+        const comp: number[] = [];
+        st[sp++] = k0;
+        seen[k0] = 1;
+        while (sp > 0) {
+          const k = st[--sp];
+          comp.push(k);
+          const X = k % MW, Y = (k / MW) | 0;
+          if (X > 0 && off[k - 1] && !seen[k - 1]) { seen[k - 1] = 1; st[sp++] = k - 1; }
+          if (X + 1 < MW && off[k + 1] && !seen[k + 1]) { seen[k + 1] = 1; st[sp++] = k + 1; }
+          if (Y > 0 && off[k - MW] && !seen[k - MW]) { seen[k - MW] = 1; st[sp++] = k - MW; }
+          if (Y + 1 < MH && off[k + MW] && !seen[k + MW]) { seen[k + MW] = 1; st[sp++] = k + MW; }
+        }
+        if (comp.length < minDetail) for (const k of comp) off[k] = 0;
+      }
+    }
     const mask = new Uint8Array(MW * MH);
     let area = 0;
     for (let Y = 0; Y < MH; Y++) {
       for (let X = 0; X < MW; X++) {
         const k = Y * MW + X;
-        if (raw[k] && isOpaque(X, Y)) {
+        if (raw[k] && !off[k] && isOpaque(X, Y)) {
           mask[k] = 1;
           area++;
         }

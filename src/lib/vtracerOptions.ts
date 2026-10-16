@@ -36,9 +36,10 @@ export function buildVtracerOptions(
 
   if (cfg.lockedPalette && Array.isArray(cfg.lockedPalette) && cfg.lockedPalette.length > 0) {
     options.palette = cfg.lockedPalette;
-  } else if (cfg.snappedPalette && Array.isArray(cfg.snappedPalette) && cfg.snappedPalette.length > 0) {
-    options.palette = cfg.snappedPalette;
   }
+  // Palet hasil snapping sengaja TIDAK diserahkan ke vtracer: vtracer mencocokkan warna rata-rata
+  // klaster yang dilebur dengan jarak RGB (huruf perak → emas). Warna hasil dicocokkan ulang ke palet
+  // secara perseptual oleh recolorSvgByVisibility setelah tracing.
 
   return options;
 }

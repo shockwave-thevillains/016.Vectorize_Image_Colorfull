@@ -912,7 +912,7 @@ export function optimizeAndMergeSvg(svgString: string): string {
  * dan warnanya cukup mirip; dalam tiap kelompok, warna minoritas yang NETRAL (abu/perak, kroma
  * rendah) diganti warna mayoritas kelompok. Warna jenuh yang berbeda (merah ↔ oranye) tidak disentuh.
  */
-export function unifyGlyphColors(imageData: ImageData, scale: number): void {
+export function unifyGlyphColors(imageData: ImageData, scale: number, original?: Uint8ClampedArray): void {
   const { width: w, height: h, data } = imageData;
   const total = w * h;
   const key = new Int32Array(total);
@@ -925,10 +925,6 @@ export function unifyGlyphColors(imageData: ImageData, scale: number): void {
     const dg = ((a >> 8) & 255) - ((b >> 8) & 255);
     const db = (a & 255) - (b & 255);
     return dr * dr + dg * dg + db * db;
-  };
-  const chroma = (a: number) => {
-    const r = (a >> 16) & 255, g = (a >> 8) & 255, b = a & 255;
-    return Math.max(r, g, b) - Math.min(r, g, b);
   };
   const maxArea = Math.round((10 * scale) ** 2);
   const CONTRAST_SQ = 80 * 80;
@@ -978,7 +974,7 @@ export function unifyGlyphColors(imageData: ImageData, scale: number): void {
     return a;
   };
   // kelompokkan komponen kandidat yang berdekatan (≈ jarak antarhuruf) dan warnanya mirip
-  const gap = Math.max(3, Math.round(2.5 * scale));
+  const gap = Math.max(4, Math.round(4 * scale));
   for (let i = 0; i < total; i++) {
     const a = comp[i];
     if (a < 0 || !compCand[a]) continue;
@@ -1001,25 +997,63 @@ export function unifyGlyphColors(imageData: ImageData, scale: number): void {
       }
     }
   }
-  // warna mayoritas (luas) per kelompok
-  const groupArea = new Map<number, Map<number, number>>();
+  // Warna kata ditentukan dari RONA warna ASLI hurufnya (bukan luas): teks abu/perak netral → warna
+  // palet netral, teks emas pucat (rona hangat) → emas. Kata yang hurufnya memang berbeda rona
+  // (merah ↔ oranye) dilewati.
+  const src = original ?? data;
+  const sumR = new Float64Array(nComp), sumG = new Float64Array(nComp), sumB = new Float64Array(nComp);
+  for (let i = 0; i < total; i++) {
+    const c = comp[i];
+    if (c < 0 || !compCand[c]) continue;
+    const j = i * 4;
+    sumR[c] += src[j]; sumG[c] += src[j + 1]; sumB[c] += src[j + 2];
+  }
+  // vektor rona (r−L, g−L, b−L) dengan L = rata-rata kanal
+  const hueVec = (r: number, g: number, b: number): [number, number, number] => {
+    const L = (r + g + b) / 3;
+    return [r - L, g - L, b - L];
+  };
+  const groupsOf = new Map<number, number[]>();
   for (let c = 0; c < nComp; c++) {
     if (!compCand[c]) continue;
     const g = find(c);
-    let m = groupArea.get(g);
-    if (!m) { m = new Map(); groupArea.set(g, m); }
-    m.set(compKey[c], (m.get(compKey[c]) ?? 0) + compArea[c]);
+    const arr = groupsOf.get(g);
+    if (arr) arr.push(c); else groupsOf.set(g, [c]);
   }
   const target = new Int32Array(nComp).fill(-2);
-  for (let c = 0; c < nComp; c++) {
-    if (!compCand[c]) continue;
-    const m = groupArea.get(find(c))!;
-    if (m.size < 2) continue;
-    let sum = 0, best = 0, bestN = -1;
-    for (const [k, n] of m) { sum += n; if (n > bestN) { bestN = n; best = k; } }
-    if (best === compKey[c] || bestN < sum * 0.5) continue;
-    if (chroma(compKey[c]) >= 40 && rgbDistSq(compKey[c], best) > 60 * 60) continue;
-    target[c] = best;
+  for (const cs of groupsOf.values()) {
+    if (cs.length < 2) continue;
+    const keys = new Map<number, number>(); // warna → luas
+    let R = 0, G = 0, B = 0, A = 0;
+    for (const c of cs) {
+      keys.set(compKey[c], (keys.get(compKey[c]) ?? 0) + compArea[c]);
+      R += sumR[c]; G += sumG[c]; B += sumB[c]; A += compArea[c];
+    }
+    if (keys.size < 2) continue;
+    const m = hueVec(R / A, G / A, B / A);
+    const mLen = Math.hypot(m[0], m[1], m[2]);
+    // rona huruf-huruf harus seragam
+    let spread = 0;
+    for (const c of cs) {
+      if (compArea[c] < 20) continue;
+      const v = hueVec(sumR[c] / compArea[c], sumG[c] / compArea[c], sumB[c] / compArea[c]);
+      spread = Math.max(spread, Math.hypot(v[0] - m[0], v[1] - m[1], v[2] - m[2]));
+    }
+    if (spread > 35) continue;
+    const neutral = mLen < 8;
+    let best = -1, bestA = -1;
+    for (const [k, a] of keys) {
+      const v = hueVec((k >> 16) & 255, (k >> 8) & 255, k & 255);
+      const vLen = Math.hypot(v[0], v[1], v[2]);
+      const ok = neutral
+        ? vLen < 15
+        : vLen >= 10 && (v[0] * m[0] + v[1] * m[1] + v[2] * m[2]) / (vLen * mLen) > 0.9;
+      if (ok && a > bestA) { bestA = a; best = k; }
+    }
+    if (best === -1) continue;
+    for (const c of cs) {
+      if (compKey[c] !== best && rgbDistSq(compKey[c], best) <= SIMILAR_SQ) target[c] = best;
+    }
   }
   for (let i = 0; i < total; i++) {
     const c = comp[i];
@@ -1132,4 +1166,118 @@ export function widenThinStrokes(imageData: ImageData, original: Uint8ClampedArr
     data[j + 2] = k & 255;
     data[j + 3] = 255;
   }
+}
+
+/**
+ * Peta indeks palet per piksel (255 = transparan / bukan warna palet), dibuat SEBELUM raster dikirim
+ * ke vtracer. Dipakai `recolorSvgFromRaster`.
+ */
+export function buildPaletteIndexMap(imageData: ImageData, palette: string[]): Uint8Array {
+  const { width, height, data } = imageData;
+  const idx = new Map<number, number>();
+  palette.slice(0, 254).forEach((hex, i) => {
+    const c = hexToRgb(hex);
+    idx.set((c.r << 16) | (c.g << 8) | c.b, i);
+  });
+  const out = new Uint8Array(width * height).fill(255);
+  for (let i = 0; i < width * height; i++) {
+    const j = i * 4;
+    if (data[j + 3] < 30) continue;
+    const k = idx.get((data[j] << 16) | (data[j + 1] << 8) | data[j + 2]);
+    if (k !== undefined) out[i] = k;
+  }
+  return out;
+}
+
+/**
+ * Tetapkan ulang warna tiap path hasil vtracer ke warna palet. vtracer meleburkan klaster kecil dan
+ * memakai warna RATA-RATA gabungannya (termasuk tetangga/transparan), sehingga mis. huruf perak di
+ * atas latar bergradasi bisa keluar keemasan. Setiap path dirasterisasi dari yang PALING ATAS ke
+ * bawah; hanya piksel yang benar-benar terlihat (belum tertutup path di atasnya) yang dihitung, dan
+ * path diberi warna palet raster yang paling banyak di piksel itu. Bila tidak ada piksel terlihat yang
+ * cukup → warna palet terdekat secara perseptual (Lab).
+ */
+export function recolorSvgByVisibility(
+  svg: string,
+  palette: string[],
+  indexMap: Uint8Array | undefined,
+  width: number,
+  height: number,
+  bbox: (d: string) => [number, number, number, number] | null
+): string {
+  if (!palette || palette.length === 0) return svg;
+  const labs = palette.map((hex) => {
+    const c = hexToRgb(hex);
+    return { hex: c.hex, lab: rgbToLab(c.r, c.g, c.b) };
+  });
+  const nearest = (hex: string) => {
+    const c = hexToRgb(hex);
+    const L = rgbToLab(c.r, c.g, c.b);
+    let best = 0, bestD = Infinity;
+    for (let i = 0; i < labs.length; i++) {
+      const p = labs[i].lab;
+      const d = (L[0] - p[0]) ** 2 + (L[1] - p[1]) ** 2 + (L[2] - p[2]) ** 2;
+      if (d < bestD) { bestD = d; best = i; }
+    }
+    return labs[best].hex;
+  };
+  const re = /<path\b([^>]*?)\bd="([^"]+)"([^>]*?)fill="(#[0-9a-fA-F]{6})"/g;
+  const items: Array<{ start: number; end: number; pre: string; d: string; mid: string; hex: string }> = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(svg)) !== null) {
+    items.push({ start: m.index, end: m.index + m[0].length, pre: m[1], d: m[2], mid: m[3], hex: m[4] });
+  }
+  const colors: string[] = items.map((it) => nearest(it.hex));
+  const canvasOk = typeof document !== 'undefined' || typeof OffscreenCanvas !== 'undefined';
+  if (indexMap && width > 0 && height > 0 && canvasOk && typeof Path2D !== 'undefined') {
+    const covered = new Uint8Array(width * height);
+    const counts = new Int32Array(labs.length);
+    const mk = (w: number, h: number): HTMLCanvasElement | OffscreenCanvas => {
+      if (typeof OffscreenCanvas !== 'undefined') return new OffscreenCanvas(w, h);
+      const c = document.createElement('canvas');
+      c.width = w;
+      c.height = h;
+      return c;
+    };
+    for (let k = items.length - 1; k >= 0; k--) {
+      const bb = bbox(items[k].d);
+      if (!bb) continue;
+      const x0 = Math.max(0, Math.floor(bb[0])), y0 = Math.max(0, Math.floor(bb[1]));
+      const x1 = Math.min(width, Math.ceil(bb[2])), y1 = Math.min(height, Math.ceil(bb[3]));
+      const bw = x1 - x0, bh = y1 - y0;
+      if (bw <= 0 || bh <= 0) continue;
+      const canvas = mk(bw, bh);
+      const ctx = canvas.getContext('2d') as CanvasRenderingContext2D | null;
+      if (!ctx) continue;
+      ctx.translate(-x0, -y0);
+      ctx.fillStyle = '#000';
+      ctx.fill(new Path2D(items[k].d));
+      const px = ctx.getImageData(0, 0, bw, bh).data;
+      counts.fill(0);
+      let n = 0;
+      for (let y = 0; y < bh; y++) {
+        const row = (y0 + y) * width + x0;
+        for (let x = 0; x < bw; x++) {
+          if (px[(y * bw + x) * 4 + 3] < 128) continue;
+          const g = row + x;
+          if (covered[g]) continue;
+          covered[g] = 1;
+          const ci = indexMap[g];
+          if (ci < labs.length) { counts[ci]++; n++; }
+        }
+      }
+      if (n >= 4) {
+        let top = 0;
+        for (let i = 1; i < labs.length; i++) if (counts[i] > counts[top]) top = i;
+        colors[k] = labs[top].hex;
+      }
+    }
+  }
+  let out = '';
+  let last = 0;
+  items.forEach((it, k) => {
+    out += svg.slice(last, it.start) + `<path${it.pre}d="${it.d}"${it.mid}fill="${colors[k]}"`;
+    last = it.end;
+  });
+  return out + svg.slice(last);
 }

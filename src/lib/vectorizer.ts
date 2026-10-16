@@ -17,6 +17,8 @@ import {
   mergeThinRims,
   unifyGlyphColors,
   widenThinStrokes,
+  buildPaletteIndexMap,
+  recolorSvgByVisibility,
   optimizeAndMergeSvg,
   hexToRgb,
 } from './colorSnapping';
@@ -660,7 +662,7 @@ export function loadImageToCanvas(
         );
         growTransparentSimilar(workingImageData, preSnap, 2, 30);
         mergeThinRims(workingImageData, Math.max(1.5, effectiveScale * 0.9), 70);
-        unifyGlyphColors(workingImageData, effectiveScale);
+        unifyGlyphColors(workingImageData, effectiveScale, preSnap);
         if (config.smoothEdges !== false) majorityFilter(workingImageData, 2);
         widenThinStrokes(workingImageData, preSnap, effectiveScale);
         rawColorCount = dominantPalette.rawColorCount;
@@ -868,6 +870,25 @@ function sleep(ms = 0): Promise<void> {
  * moved 1:1 to the browser: bake transforms, drop background-colored paths,
  * and normalize the root <svg> attributes.
  */
+/** Kotak batas path (koordinat absolut) — untuk `recolorSvgFromRaster`. */
+function pathBBox(d: string): [number, number, number, number] | null {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  try {
+    svgpath(d).abs().iterate((seg: any[]) => {
+      for (let k = 1; k + 1 < seg.length; k += 2) {
+        const x = seg[k], y = seg[k + 1];
+        if (x < x0) x0 = x;
+        if (x > x1) x1 = x;
+        if (y < y0) y0 = y;
+        if (y > y1) y1 = y;
+      }
+    });
+  } catch {
+    return null;
+  }
+  return x0 <= x1 ? [x0, y0, x1, y1] : null;
+}
+
 function postProcessVtracerSvg(rawSvg: string, w: number, h: number, config: VectorizeConfig): string {
   if (!rawSvg || !rawSvg.includes('<svg')) {
     throw new Error('Gagal menghasilkan kurva vektor SVG dari gambar.');
@@ -937,12 +958,28 @@ async function vectorizeWithVtracer(
   const vtracerOptions = buildVtracerOptions({ ...config, filterSpeckle: speckle, mergedColorCount, snappedPalette });
   // Lapisan warna datar + setiap masker gradien di-trace paralel di pool worker.
   // Buffer piksel dipindahkan (zero-copy) ke worker; imageData tidak dipakai lagi setelah ini.
+  // Mode magenta: path latar magenta harus tetap magenta agar tersaring → jangan dicocokkan ulang.
+  const fillPalette =
+    (config.bgMode ?? 'white') === 'magenta'
+      ? []
+      : config.lockedPalette && config.lockedPalette.length > 0
+        ? config.lockedPalette
+        : snappedPalette || [];
+  // Peta warna raster harus dibuat sebelum buffer dipindahkan ke worker.
+  const paletteIndex = fillPalette.length > 0 ? buildPaletteIndexMap(imageData, fillPalette) : undefined;
   const flatJob = vectorizeRgbaInWorker(imageData.data, width, height, vtracerOptions);
   const gradientJobs = gradientRegions.map((r) => traceGradientRegion(r, { ...config, filterSpeckle: speckle }));
   const [{ svg: rawSvg }, gradientDs] = await Promise.all([flatJob, Promise.all(gradientJobs)]);
   onProgress?.(80);
 
-  let finalSvg = bakeTransformsWithSvgPath(postProcessVtracerSvg(rawSvg, width || 600, height || 600, config));
+  let finalSvg = recolorSvgByVisibility(
+    bakeTransformsWithSvgPath(postProcessVtracerSvg(rawSvg, width || 600, height || 600, config)),
+    fillPalette,
+    paletteIndex,
+    width,
+    height,
+    pathBBox
+  );
 
   const gradientItems = gradientRegions
     .map((r, i) => ({ spec: r.spec, d: gradientDs[i] }))

@@ -25,6 +25,12 @@ npm run build   # wajib lolos sebelum commit
   agar batas jatuh di rusuk) → komponen terhubung → fit ulang (maks 3 tingkat). Area didominasi satu
   warna datar ditolak; area diterima "tumbuh" ke piksel sisa yang cocok; urutan path = luas fillMask.
   Penggabungan tetangga butuh ΔE kecil pada gambar ter-blur DAN asli (dua warna datar mirip ≠ gradien).
+  Area hampir-datar yang bertetangga (terpisah garis ≤ 6 px analisis, warna rata-rata ≤ 45) dicoba
+  sebagai SATU gradien (pad chip emas yang dipisah garis kontak); diterima hanya bila model juga
+  menjelaskan variasi DI DALAM tiap bagian (galat ≤ 0.7× galat rata-rata bagian — ilustrasi datar
+  seperti muka kotak/bumper ditolak) dan tanpa lompatan stop tajam. Masker dicek ulang di resolusi
+  kerja: piksel > 50 RGB dari prediksi (struktur ≥ 12 px, mis. garis 1 px) tetap di lapisan datar.
+  Peringatan "pita warna" hanya untuk area gagal-fit ≥ 0.15% piksel.
 - `src/lib/colorSnapping.ts` — palet: warna dianggap berbeda bila ΔE76 ≥ `PALETTE_MIN_DELTA_E` (6);
   `snapEdgesToLocalColors` membatasi piksel anti-aliasing ke warna yang ada di sekitarnya (anti-halo);
   piksel tepi yang lebih mirip latar transparan (area gradien/background) dibuat transparan, dan piksel
@@ -35,11 +41,16 @@ npm run build   # wajib lolos sebelum commit
   bila lebih dekat ke warna asli daripada semua acuan dekat. Lalu `growTransparentSimilar` (2 px),
   `mergeThinRims` (halo tipis penajaman JPEG dilebur ke objek tebal bila terjepit objek ↔ latar yang
   berbeda — garis di antara dua bidang sewarna, mis. kontak chip, dipertahankan), `unifyGlyphColors`
-  (huruf kecil sekata: warna minoritas netral/perak → warna mayoritas, mis. emas pucat), `majorityFilter`
+  (huruf kecil sekata diseragamkan menurut RONA warna asli: netral → warna palet netral/perak, hangat →
+  emas; kata dengan rona huruf berbeda dilewati), `majorityFilter`
   3×3 (smoothEdges; goresan 1 px kontras dilindungi), lalu `widenThinStrokes`: goresan 1–2 px kontras
   dipertebal jadi 3 px karena vtracer membuang bentuk ≤ 2 px (huruf "I" hilang) — hanya bila warnanya
   juga ada sebagai bidang tebal di dekatnya dan kedua sisinya latar yang sama.
-  Gradasi: `minAreaFraction` 0.0005, `maxRegions` 160 (angka/huruf kecil bergradasi ikut terdeteksi).
+  Gradasi: `minAreaFraction` 0.0002, `maxRegions` 160 (garis miring "%" dsb. ikut terdeteksi).
+  Palet TIDAK diserahkan ke vtracer (vtracer mencocokkan warna rata-rata klaster yang dilebur dengan
+  jarak RGB → huruf perak jadi emas). `recolorSvgByVisibility` merasterisasi tiap path dari atas ke
+  bawah dan memberi warna palet raster terbanyak di piksel yang benar-benar terlihat (Lab terdekat bila
+  tak ada). Mode magenta dikecualikan (path latar magenta harus tetap magenta untuk disaring).
   Default kurva: spline (huruf/angka bulat halus); preset logo/flat tetap polygon.
   Resolusi kerja maks 3200 px; filter bintik diskalakan dengan faktor upscale (`scaledSpeckle`).
 - `src/lib/vtracerOptions.ts` — `layerDifference: 2` WAJIB: bawaan vtracer (16) menggabungkan nuansa
