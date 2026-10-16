@@ -135,7 +135,8 @@ export function scaleSvg(svgString: string, targetWidth: number, targetHeight: n
     const dMatch = attrs.match(/\bd=["']([^"']+)["']/i);
     if (!dMatch) return fullTag;
     const rawD = dMatch[1];
-    const newD = svgpath(rawD).scale(sx, sy).abs().round(2).toString();
+    // Hasil berukuran besar (≥ 2000 px): presisi 0,1 px sudah tak terlihat dan memangkas ukuran file ±10%.
+    const newD = svgpath(rawD).scale(sx, sy).abs().round(Math.max(targetWidth, targetHeight) >= 2000 ? 1 : 2).toString();
     let cleanAttrs = attrs.replace(/\bd=["'][^"']+["']/gi, () => `d="${newD}"`);
 
     // Proportionally scale stroke-width if present

@@ -932,7 +932,7 @@ export function unifyGlyphColors(imageData: ImageData, scale: number, original?:
     const db = (a & 255) - (b & 255);
     return dr * dr + dg * dg + db * db;
   };
-  const maxArea = Math.round((10 * scale) ** 2);
+  const maxArea = Math.round((14 * scale) ** 2); // huruf teks kecil (± 10–14 px sumber), termasuk huruf lebar D/O
   const CONTRAST_SQ = 80 * 80;
   const SIMILAR_SQ = 130 * 130;
 
@@ -950,10 +950,16 @@ export function unifyGlyphColors(imageData: ImageData, scale: number, original?:
     comp[s0] = id;
     borderCount.clear();
     let borderTotal = 0;
+    let cx0 = w, cy0 = h, cx1 = -1, cy1 = -1;
     while (sp > 0) {
       const i = stack[--sp];
       area++;
       const x = i % w;
+      const yy0 = (i / w) | 0;
+      if (x < cx0) cx0 = x;
+      if (x > cx1) cx1 = x;
+      if (yy0 < cy0) cy0 = yy0;
+      if (yy0 > cy1) cy1 = yy0;
       const nbs = [x > 0 ? i - 1 : -1, x + 1 < w ? i + 1 : -1, i >= w ? i - w : -1, i + w < total ? i + w : -1];
       for (const q of nbs) {
         if (q < 0) continue;
@@ -969,10 +975,72 @@ export function unifyGlyphColors(imageData: ImageData, scale: number, original?:
     // (latar + garis halo gelap JPEG dihitung bersama)
     let contrastN = 0;
     for (const [bk, n] of borderCount) if (bk === -1 || rgbDistSq(k, bk) > CONTRAST_SQ) contrastN += n;
-    const cand = area <= maxArea && borderTotal > 0 && contrastN >= borderTotal * 0.6;
+    const cand = area <= maxArea && borderTotal > 0 && contrastN >= borderTotal * 0.6 &&
+      cx1 - cx0 <= 20 * scale && cy1 - cy0 <= 20 * scale;
     compKey.push(k); compArea.push(area); compCand.push(cand);
   }
   const nComp = compKey.length;
+  // Huruf kecil ber-JPEG sering berupa mosaik beberapa warna palet yang mirip (perak, abu kekuningan,
+  // emas pucat) — tiap kepingnya bertetangga dengan keping mirip sehingga tidak lolos uji kontras.
+  // Gabungkan keping bertetangga yang warnanya mirip menjadi satu "bentuk huruf" lalu uji bentuknya.
+  {
+    const BLOB_SQ = 70 * 70;
+    const bp = new Int32Array(nComp);
+    for (let i = 0; i < nComp; i++) bp[i] = i;
+    const bfind = (a: number): number => {
+      while (bp[a] !== a) { bp[a] = bp[bp[a]]; a = bp[a]; }
+      return a;
+    };
+    for (let i = 0; i < total; i++) {
+      const a = comp[i];
+      if (a < 0) continue;
+      const x = i % w;
+      for (const q of [x + 1 < w ? i + 1 : -1, i + w < total ? i + w : -1]) {
+        if (q < 0) continue;
+        const b = comp[q];
+        if (b < 0 || b === a || rgbDistSq(compKey[a], compKey[b]) > BLOB_SQ) continue;
+        const ra = bfind(a), rb = bfind(b);
+        if (ra !== rb) bp[ra] = rb;
+      }
+    }
+    const bArea = new Int32Array(nComp), bBorder = new Int32Array(nComp), bContrast = new Int32Array(nComp);
+    for (let c = 0; c < nComp; c++) bArea[bfind(c)] += compArea[c];
+    // kotak batas bentuk: huruf itu ringkas, bukan garis panjang (tepi kotak, garis jalan)
+    const bx0 = new Int32Array(nComp).fill(w), by0 = new Int32Array(nComp).fill(h);
+    const bx1 = new Int32Array(nComp).fill(-1), by1 = new Int32Array(nComp).fill(-1);
+    for (let i = 0; i < total; i++) {
+      const a = comp[i];
+      if (a < 0) continue;
+      const r = bfind(a);
+      if (bArea[r] > maxArea) continue;
+      const x = i % w, y = (i / w) | 0;
+      if (x < bx0[r]) bx0[r] = x;
+      if (x > bx1[r]) bx1[r] = x;
+      if (y < by0[r]) by0[r] = y;
+      if (y > by1[r]) by1[r] = y;
+    }
+    const maxSide = 20 * scale;
+    for (let i = 0; i < total; i++) {
+      const a = comp[i];
+      if (a < 0) continue;
+      const ra = bfind(a);
+      if (bArea[ra] > maxArea) continue;
+      const x = i % w;
+      for (const q of [x > 0 ? i - 1 : -1, x + 1 < w ? i + 1 : -1, i >= w ? i - w : -1, i + w < total ? i + w : -1]) {
+        if (q < 0) continue;
+        const b = comp[q];
+        if (b >= 0 && bfind(b) === ra) continue;
+        bBorder[ra]++;
+        if (key[q] === -1 || rgbDistSq(key[i], key[q]) > CONTRAST_SQ) bContrast[ra]++;
+      }
+    }
+    for (let c = 0; c < nComp; c++) {
+      if (compCand[c]) continue;
+      const r = bfind(c);
+      if (bArea[r] <= maxArea && bBorder[r] > 0 && bContrast[r] >= bBorder[r] * 0.6 &&
+          bx1[r] - bx0[r] <= maxSide && by1[r] - by0[r] <= maxSide) compCand[c] = true;
+    }
+  }
   const parent = new Int32Array(nComp);
   for (let i = 0; i < nComp; i++) parent[i] = i;
   const find = (a: number): number => {
@@ -1014,6 +1082,18 @@ export function unifyGlyphColors(imageData: ImageData, scale: number, original?:
     const j = i * 4;
     sumR[c] += src[j]; sumG[c] += src[j + 1]; sumB[c] += src[j + 2];
   }
+  // warna INTI huruf: piksel yang lebih terang/sama dengan rata-rata komponennya (tepi gelap anti-aliasing
+  // dan halo JPEG tidak ikut menentukan warna kata)
+  const coreR = new Float64Array(nComp), coreG = new Float64Array(nComp), coreB = new Float64Array(nComp);
+  const coreN = new Float64Array(nComp);
+  for (let i = 0; i < total; i++) {
+    const c = comp[i];
+    if (c < 0 || !compCand[c]) continue;
+    const j = i * 4;
+    const meanL = (sumR[c] + sumG[c] + sumB[c]) / compArea[c];
+    if (src[j] + src[j + 1] + src[j + 2] < meanL) continue;
+    coreR[c] += src[j]; coreG[c] += src[j + 1]; coreB[c] += src[j + 2]; coreN[c]++;
+  }
   // vektor rona (r−L, g−L, b−L) dengan L = rata-rata kanal
   const hueVec = (r: number, g: number, b: number): [number, number, number] => {
     const L = (r + g + b) / 3;
@@ -1026,6 +1106,11 @@ export function unifyGlyphColors(imageData: ImageData, scale: number, original?:
     const arr = groupsOf.get(g);
     if (arr) arr.push(c); else groupsOf.set(g, [c]);
   }
+  // warna-warna yang benar-benar dipakai gambar (luas total ≥ 50 px)
+  const keyArea = new Map<number, number>();
+  for (let c = 0; c < nComp; c++) keyArea.set(compKey[c], (keyArea.get(compKey[c]) ?? 0) + compArea[c]);
+  const imageKeys: number[] = [];
+  for (const [k, a] of keyArea) if (a >= 50 && k !== -1) imageKeys.push(k);
   const target = new Int32Array(nComp).fill(-2);
   for (const cs of groupsOf.values()) {
     if (cs.length < 2) continue;
@@ -1036,12 +1121,20 @@ export function unifyGlyphColors(imageData: ImageData, scale: number, original?:
       R += sumR[c]; G += sumG[c]; B += sumB[c]; A += compArea[c];
     }
     if (keys.size < 2) continue;
+    // Teks putih (warna dominan hampir putih) dilewati: tepi anti-aliasing berwarna latar (merah muda
+    // di lencana merah) tidak boleh menyeret seluruh huruf putih menjadi berwarna.
+    let domK = -1, domA = -1;
+    for (const [k, a] of keys) if (a > domA) { domA = a; domK = k; }
+    if (Math.min((domK >> 16) & 255, (domK >> 8) & 255, domK & 255) >= 225) continue;
     const m = hueVec(R / A, G / A, B / A);
     const mLen = Math.hypot(m[0], m[1], m[2]);
-    // rona huruf-huruf harus seragam
+    // rona huruf-huruf harus seragam (serpihan kecil — tepi anti-aliasing kekuningan karena JPEG —
+    // tidak dihitung: < 25% luas komponen terbesar kelompok)
+    let maxComp = 0;
+    for (const c of cs) if (compArea[c] > maxComp) maxComp = compArea[c];
     let spread = 0;
     for (const c of cs) {
-      if (compArea[c] < 20) continue;
+      if (compArea[c] < Math.max(20, maxComp * 0.25)) continue;
       const v = hueVec(sumR[c] / compArea[c], sumG[c] / compArea[c], sumB[c] / compArea[c]);
       spread = Math.max(spread, Math.hypot(v[0] - m[0], v[1] - m[1], v[2] - m[2]));
     }
@@ -1057,6 +1150,23 @@ export function unifyGlyphColors(imageData: ImageData, scale: number, original?:
       if (ok && a > bestA) { bestA = a; best = k; }
     }
     if (best === -1) continue;
+    if (neutral) {
+      // Kata bernada netral (perak/abu): pilih warna gambar yang paling dekat dengan warna ASLI kata
+      // sekaligus paling netral — warna abu kekuningan (171,166,154) yang luasnya menang tidak boleh
+      // mengalahkan perak hanya karena kebetulan lebih banyak piksel ter-snap ke sana.
+      let cr = 0, cg = 0, cb = 0, cn = 0;
+      for (const c of cs) { cr += coreR[c]; cg += coreG[c]; cb += coreB[c]; cn += coreN[c]; }
+      const mr = cn > 0 ? cr / cn : R / A, mg = cn > 0 ? cg / cn : G / A, mb = cn > 0 ? cb / cn : B / A;
+      let bestScore = Infinity, pick = best;
+      for (const k of imageKeys) {
+        const v = hueVec((k >> 16) & 255, (k >> 8) & 255, k & 255);
+        const vLen = Math.hypot(v[0], v[1], v[2]);
+        if (vLen >= 15 || rgbDistSq(k, best) > SIMILAR_SQ) continue;
+        const score = Math.hypot(((k >> 16) & 255) - mr, ((k >> 8) & 255) - mg, (k & 255) - mb) + 5 * vLen;
+        if (score < bestScore) { bestScore = score; pick = k; }
+      }
+      best = pick;
+    }
     for (const c of cs) {
       if (compKey[c] !== best && rgbDistSq(compKey[c], best) <= SIMILAR_SQ) target[c] = best;
     }

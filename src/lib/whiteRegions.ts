@@ -60,7 +60,7 @@ export function isWhitePixel(data: Pixels['data'], idx: number, tol: number): bo
 }
 
 /** Kelompokkan piksel putih menjadi area terhubung (BFS 4-arah). */
-export function labelWhiteRegions(img: Pixels, tol: number): WhiteRegionMap {
+export function labelWhiteRegions(img: Pixels, tol: number, scale = 1): WhiteRegionMap {
   const { data, width, height } = img;
   const total = width * height;
   const labels = new Int32Array(total).fill(-1);
@@ -118,8 +118,128 @@ export function labelWhiteRegions(img: Pixels, tol: number): WhiteRegionMap {
   }
 
   const map = { width, height, labels, regions };
+  attachTintedWhite(map, img, tol, scale);
   markSeeThroughRegions(map);
   return map;
+}
+
+/**
+ * Putih yang tidak murni: goresan/kilau putih tipis di atas warna (garis miring "%" putih di lencana
+ * merah, bintang kilau) dan tepi anti-aliasing putih berwarna campuran (mis. 255,215,199) karena JPEG.
+ * Komponen piksel terang (di bawah toleransi putih) diterima sebagai putih bila:
+ *  - TIPIS: tidak punya bagian dalam yang jauh (> 3 px sumber) dari warna objek di sekitarnya —
+ *    bidang pastel (pink muda, krem) punya bagian dalam berwarna sehingga tetap dipertahankan;
+ *  - warnanya = campuran putih + warna tepi sekitarnya (porsi putih ≥ 55%, residu kecil).
+ * Komponen yang menempel pada area putih digabung ke area itu (keputusan & klik ikut area tersebut);
+ * selain itu menjadi area "putih dalam" baru.
+ */
+function attachTintedWhite(map: WhiteRegionMap, img: Pixels, tol: number, scale: number): void {
+  const { width: w, height: h, labels, regions } = map;
+  const { data } = img;
+  const total = w * h;
+  const minC = tol - 45, minAvg = tol - 25;
+  const tint = new Uint8Array(total);
+  let any = false;
+  for (let p = 0; p < total; p++) {
+    if (labels[p] !== -1) continue;
+    const i = p * 4;
+    if (data[i + 3] < ALPHA_EMPTY) continue;
+    const r = data[i], g = data[i + 1], b = data[i + 2];
+    if (Math.min(r, g, b) >= minC && r + g + b >= 3 * minAvg) { tint[p] = 1; any = true; }
+  }
+  if (!any) return;
+  // jarak (chamfer 3/4) ke piksel "padat" (bukan putih, bukan terang)
+  const INF = 1 << 29;
+  const dist = new Int32Array(total);
+  for (let p = 0; p < total; p++) dist[p] = labels[p] === -1 && !tint[p] ? 0 : INF;
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const p = y * w + x;
+    let d = dist[p];
+    if (d === 0) continue;
+    if (x > 0) d = Math.min(d, dist[p - 1] + 3);
+    if (y > 0) {
+      d = Math.min(d, dist[p - w] + 3);
+      if (x > 0) d = Math.min(d, dist[p - w - 1] + 4);
+      if (x + 1 < w) d = Math.min(d, dist[p - w + 1] + 4);
+    }
+    dist[p] = d;
+  }
+  for (let y = h - 1; y >= 0; y--) for (let x = w - 1; x >= 0; x--) {
+    const p = y * w + x;
+    let d = dist[p];
+    if (d === 0) continue;
+    if (x + 1 < w) d = Math.min(d, dist[p + 1] + 3);
+    if (y + 1 < h) {
+      d = Math.min(d, dist[p + w] + 3);
+      if (x + 1 < w) d = Math.min(d, dist[p + w + 1] + 4);
+      if (x > 0) d = Math.min(d, dist[p + w - 1] + 4);
+    }
+    dist[p] = d;
+  }
+  const interiorD = Math.round(3 * Math.max(1, scale) * 3); // > 3 px sumber dari warna objek
+  const seen = new Uint8Array(total);
+  const queue = new Int32Array(total);
+  const adj = new Map<number, number>();
+  for (let s0 = 0; s0 < total; s0++) {
+    if (!tint[s0] || seen[s0]) continue;
+    let head = 0, tail = 0;
+    queue[tail++] = s0;
+    seen[s0] = 1;
+    let mr = 0, mg = 0, mb = 0, interior = 0, touches = false;
+    let br = 0, bg = 0, bb = 0, bn = 0, bWhite = 0;
+    adj.clear();
+    while (head < tail) {
+      const p = queue[head++];
+      const i = p * 4;
+      mr += data[i]; mg += data[i + 1]; mb += data[i + 2];
+      if (dist[p] > interiorD) interior++;
+      const x = p % w, y = (p / w) | 0;
+      if (x === 0 || y === 0 || x === w - 1 || y === h - 1) touches = true;
+      const nbs = [x > 0 ? p - 1 : -1, x + 1 < w ? p + 1 : -1, y > 0 ? p - w : -1, y + 1 < h ? p + w : -1];
+      for (const q of nbs) {
+        if (q < 0) continue;
+        if (tint[q]) {
+          if (!seen[q]) { seen[q] = 1; queue[tail++] = q; }
+          continue;
+        }
+        const l = labels[q];
+        if (l !== -1) { bWhite++; adj.set(l, (adj.get(l) ?? 0) + 1); continue; }
+        const j = q * 4;
+        if (data[j + 3] < ALPHA_EMPTY) continue;
+        br += data[j]; bg += data[j + 1]; bb += data[j + 2]; bn++;
+      }
+    }
+    const n = tail;
+    if (interior > n * 0.1 || bn < (bn + bWhite) * 0.25 || bn === 0) continue;
+    // campuran putih + warna tepi?
+    const dr = mr / n - 255, dg = mg / n - 255, db = mb / n - 255;
+    const vr = br / bn - 255, vg = bg / bn - 255, vb = bb / bn - 255;
+    const vv = vr * vr + vg * vg + vb * vb;
+    if (vv < 40 * 40) continue; // tepi sendiri terang → bukan putih di atas warna
+    const t = (dr * vr + dg * vg + db * vb) / vv;
+    const res = Math.hypot(dr - t * vr, dg - t * vg, db - t * vb);
+    if (t < 0 || t > 0.45 || res > 14) continue;
+    // terima: gabung ke area putih tetangga terbanyak, atau area baru
+    let id = -1, best = 0;
+    for (const [l, c] of adj) if (c > best) { best = c; id = l; }
+    let info: WhiteRegionInfo;
+    if (id >= 0) info = regions[id];
+    else {
+      id = regions.length;
+      info = { id, area: 0, touchesBorder: touches, seeThrough: false, minX: w, minY: h, maxX: 0, maxY: 0, removed: false, overridden: false };
+      regions.push(info);
+    }
+    for (let k = 0; k < n; k++) {
+      const p = queue[k];
+      labels[p] = id;
+      info.area++;
+      const x = p % w, y = (p / w) | 0;
+      if (x < info.minX) info.minX = x;
+      if (x > info.maxX) info.maxX = x;
+      if (y < info.minY) info.minY = y;
+      if (y > info.maxY) info.maxY = y;
+    }
+  }
 }
 
 /**
@@ -361,10 +481,12 @@ export function computeWhiteBackgroundMask(
   config: Pick<
     VectorizeConfig,
     'whiteTolerance' | 'keepInnerWhite' | 'whiteRegionOverrides' | 'removeShadow' | 'shadowMinLight'
-  >
+  >,
+  /** Skala gambar terhadap gambar sumber (pipeline: faktor upscale; preview: 1). */
+  scale = 1
 ): BackgroundMaskResult {
   const tol = config.whiteTolerance ?? 242;
-  const map = labelWhiteRegions(img, tol);
+  const map = labelWhiteRegions(img, tol, scale);
   decideWhiteRemoval(map, config.keepInnerWhite !== false, config.whiteRegionOverrides || []);
 
   const total = img.width * img.height;
@@ -486,7 +608,7 @@ export function applyWhiteBackgroundRemoval(
   /** Faktor upscale gambar kerja: pita anti-aliasing ikut melebar, jadi defringe butuh lebih banyak lintasan. */
   upscale = 1
 ): BackgroundMaskResult {
-  const result = computeWhiteBackgroundMask(img, config);
+  const result = computeWhiteBackgroundMask(img, config, upscale);
   const { data } = img;
   const total = img.width * img.height;
   for (let p = 0; p < total; p++) {

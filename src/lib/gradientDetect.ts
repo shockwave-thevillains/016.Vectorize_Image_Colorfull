@@ -84,6 +84,7 @@ const WITHIN_RATIO = 0.7; // model gradien kelompok harus menjelaskan ≥ 30% va
 const DETAIL_T = 50; // selisih RGB dari prediksi gradien (resolusi kerja) agar piksel tetap detail datar
 const MODE_R2 = 0.6; // area besar "hampir satu warna" diterima sebagai gradien bila model menjelaskan ≥ 60% variasi
 const ABSORB_RMSE = 6; // area datar terpotong garis boleh ikut gradien tetangga bila galat ≤ ini
+const RECLAIM_T = 40; // piksel di bawah path gradien yang sedekat ini dengan prediksi ikut masker (resolusi kerja)
 const GROW_T = 18; // selisih warna maks. (RGB) agar piksel sisa diserap area gradien tetangganya
 const MAX_SPLIT_DEPTH = 3; // area gagal di-fit dipecah paling banyak 3 tingkat (≤ 8 sub-area)
 const RAW_EDGE_T = 8; // langkah ΔE asli di atas ini = tepi tajam
@@ -1224,6 +1225,7 @@ export function detectGradientRegions(img: Pixels, opts: GradientDetectOptions =
       const m = a.spec.matrix;
       const det = m[0] * m[3] - m[1] * m[2];
       const pr = new Float64Array(3);
+      const dev = new Float32Array(MW * MH);
       for (let Y = 0; Y < MH; Y++) {
         for (let X = 0; X < MW; X++) {
           const k = Y * MW + X;
@@ -1232,7 +1234,35 @@ export function detectGradientRegions(img: Pixels, opts: GradientDetectOptions =
           const qx = (m[3] * dx - m[2] * dy) / det, qy = (-m[1] * dx + m[0] * dy) / det;
           evalStops(a.spec.stops, a.spec.type === 'linear' ? qx : Math.hypot(qx, qy), pr);
           const i = ((Y0 + Y) * img.width + X0 + X) * 4;
-          if (Math.hypot(img.data[i] - pr[0], img.data[i + 1] - pr[1], img.data[i + 2] - pr[2]) > DETAIL_T) off[k] = 1;
+          dev[k] = Math.hypot(img.data[i] - pr[0], img.data[i + 1] - pr[1], img.data[i + 2] - pr[2]);
+        }
+      }
+      // Ambang adaptif: piksel menjadi detail bila menyimpang > DETAIL_T DAN ≥ 50% simpangan terbesar
+      // di sekitarnya (inti garis). Tepi anti-aliasing garis tipis (mis. garis kontak chip) tidak ikut,
+      // sehingga garis tidak menebal; garis yang samar tetap utuh karena ambangnya ikut turun.
+      const R = Math.max(2, Math.round(f * 1.5));
+      const rowMax = new Float32Array(MW * MH);
+      for (let Y = 0; Y < MH; Y++) {
+        for (let X = 0; X < MW; X++) {
+          let mx = 0;
+          for (let d = -R; d <= R; d++) {
+            const xx = X + d;
+            if (xx >= 0 && xx < MW && dev[Y * MW + xx] > mx) mx = dev[Y * MW + xx];
+          }
+          rowMax[Y * MW + X] = mx;
+        }
+      }
+      for (let Y = 0; Y < MH; Y++) {
+        for (let X = 0; X < MW; X++) {
+          const k = Y * MW + X;
+          const v = dev[k];
+          if (v <= DETAIL_T) continue;
+          let mx = 0;
+          for (let d = -R; d <= R; d++) {
+            const yy = Y + d;
+            if (yy >= 0 && yy < MH && rowMax[yy * MW + X] > mx) mx = rowMax[yy * MW + X];
+          }
+          if (v >= mx * 0.5) off[k] = 1;
         }
       }
       const minDetail = Math.max(12, Math.round(3 * f * f));
@@ -1313,6 +1343,38 @@ export function detectGradientRegions(img: Pixels, opts: GradientDetectOptions =
       fill = next;
     }
 
+    // Klaim ulang di resolusi kerja: piksel di bawah path gradien (fillMask) yang belum termasuk masker
+    // tetapi warnanya cocok dengan gradien. Di resolusi analisis garis tipis (garis kontak chip 1 px)
+    // menjadi pita ±2 px analisis yang seluruhnya tertinggal di lapisan datar → garis menebal. Dengan
+    // klaim ini hanya inti garis yang tetap datar.
+    {
+      const mm = a.spec.matrix;
+      const det = mm[0] * mm[3] - mm[1] * mm[2];
+      const pr = new Float64Array(3);
+      const dv = new Float32Array(MW * MH).fill(-1);
+      for (let Y = 0; Y < MH; Y++) {
+        for (let X = 0; X < MW; X++) {
+          const k = Y * MW + X;
+          if (!fill[k] || !isOpaque(X, Y)) continue;
+          const dx = (X0 + X + 0.5) / f - mm[4], dy = (Y0 + Y + 0.5) / f - mm[5];
+          const qx = (mm[3] * dx - mm[2] * dy) / det, qy = (-mm[1] * dx + mm[0] * dy) / det;
+          evalStops(a.spec.stops, a.spec.type === 'linear' ? qx : Math.hypot(qx, qy), pr);
+          const i = ((Y0 + Y) * img.width + X0 + X) * 4;
+          dv[k] = Math.hypot(img.data[i] - pr[0], img.data[i + 1] - pr[1], img.data[i + 2] - pr[2]);
+        }
+      }
+      for (let Y = 0; Y < MH; Y++) {
+        for (let X = 0; X < MW; X++) {
+          const k = Y * MW + X;
+          if (mask[k] || raw[k] || dv[k] < 0) continue;
+          if (dv[k] <= RECLAIM_T) {
+            mask[k] = 1;
+            area++;
+          }
+        }
+      }
+    }
+
     // Matriks analisis → kerja: p_kerja = f · p_analisis
     const m = a.spec.matrix;
     const spec: GradientSpec = {
@@ -1337,6 +1399,34 @@ export function detectGradientRegions(img: Pixels, opts: GradientDetectOptions =
   // paling bawah, sehingga gradien di dalam lubangnya (mis. lingkaran merah di dalam cincin emas)
   // tetap di atas dan tidak tertutup.
   regions.sort((a, b) => b.fillArea - a.fillArea);
+  // Piksel yang dilubangi oleh suatu gradien harus menampilkan gradien ITU. Bila path gradien lain yang
+  // lebih atas (urutan tumpukan) menutupinya — mis. lubang huruf "O" emas di atas latar gradien gelap —
+  // piksel itu dikembalikan ke lapisan datar, kalau tidak lubang huruf tampil berwarna emas.
+  {
+    const W = img.width;
+    const top = new Int16Array(W * img.height).fill(-1);
+    regions.forEach((r, ri) => {
+      for (let Y = 0; Y < r.h; Y++) {
+        for (let X = 0; X < r.w; X++) {
+          if (r.fillMask[Y * r.w + X]) top[(r.y0 + Y) * W + r.x0 + X] = ri;
+        }
+      }
+    });
+    regions.forEach((r, ri) => {
+      for (let Y = 0; Y < r.h; Y++) {
+        for (let X = 0; X < r.w; X++) {
+          const k = Y * r.w + X;
+          if (!r.mask[k]) continue;
+          const t = top[(r.y0 + Y) * W + r.x0 + X];
+          if (t > ri) {
+            const o = regions[t];
+            const ok = o.mask[(r.y0 + Y - o.y0) * o.w + (r.x0 + X - o.x0)];
+            if (!ok) { r.mask[k] = 0; r.area--; }
+          }
+        }
+      }
+    });
+  }
   return { regions, fallbackCount };
 }
 

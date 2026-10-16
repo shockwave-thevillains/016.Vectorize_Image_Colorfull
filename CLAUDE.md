@@ -21,6 +21,9 @@ npm run build   # wajib lolos sebelum commit
   jalan) default dihapus — luas ≥ 0.5% dan 15–85% tepinya penghalang tipis (≤ 2% sisi gambar) dengan
   background di baliknya; celah kecil pada penghalang yang sama dan area di balik penghalang tipis dari
   area tembus ikut. Huruf putih di pita merah (kecil) / cincin putih (penghalang tebal) tetap.
+  `attachTintedWhite`: putih tak murni (di bawah toleransi) ikut dianggap putih bila TIPIS (tak punya
+  bagian dalam > 3 px sumber dari warna objek) dan warnanya = campuran putih + warna tepinya (porsi putih
+  ≥ 55%) — garis miring "%" putih di lencana merah, bintang kilau; bidang pastel tetap dipertahankan.
   Dipakai pipeline (resolusi kerja) dan `WhiteRegionPicker` (resolusi asli) — harus tetap satu sumber.
 - `src/lib/gradientDetect.ts` — segmentasi + fit linear (arah dari bidang & dari kelengkungan) /
   radial-elips, profil multi-stop (RDP). Area diterima → `mask` dilubangi dari lapisan datar,
@@ -44,6 +47,10 @@ npm run build   # wajib lolos sebelum commit
   gelap sedikit dari gradien PALING ATAS di titik itu dibuat transparan (bercak halo di sela huruf kecil);
   `growTransparentSimilar` juga menyerap halo yang sedikit lebih gelap — keduanya hanya di sebelah gradien
   gelap (garis kontak chip emas harus tetap).
+  Di resolusi kerja piksel di bawah path gradien (fillMask) yang ≤ `RECLAIM_T` (40) dari prediksi ikut
+  masker (garis 1 px tidak menebal jadi pita ±2 px analisis). Setelah urut tumpukan: piksel yang
+  dilubangi gradien A tetapi tertutup path gradien B yang lebih atas (dan bukan masker B) dikembalikan ke
+  lapisan datar — kalau tidak, lubang huruf "O" emas di atas latar gradien tampil emas.
 - `src/lib/colorSnapping.ts` — palet: warna dianggap berbeda bila ΔE76 ≥ `PALETTE_MIN_DELTA_E` (6);
   `snapEdgesToLocalColors` membatasi piksel anti-aliasing ke warna yang ada di sekitarnya (anti-halo);
   piksel tepi yang lebih mirip latar transparan (area gradien/background) dibuat transparan, dan piksel
@@ -55,7 +62,9 @@ npm run build   # wajib lolos sebelum commit
   `mergeThinRims` (halo tipis penajaman JPEG dilebur ke objek tebal bila terjepit objek ↔ latar yang
   berbeda — garis di antara dua bidang sewarna, mis. kontak chip, dipertahankan), `unifyGlyphColors`
   (huruf kecil sekata diseragamkan menurut RONA warna asli: netral → warna palet netral/perak, hangat →
-  emas; kata dengan rona huruf berbeda dilewati), `majorityFilter`
+  emas; kata dengan rona huruf berbeda / teks putih dilewati; keping huruf bertetangga yang warnanya
+  mirip diuji sebagai satu bentuk ringkas ≤ 20 px sumber; warna kata netral = warna gambar terdekat ke
+  warna INTI huruf, piksel ≥ rata-rata komponen, dengan penalti rona), `majorityFilter`
   3×3 (smoothEdges; goresan 1 px kontras dilindungi), lalu `widenThinStrokes`: goresan 1–2 px kontras
   dipertebal jadi 3 px karena vtracer membuang bentuk ≤ 2 px (huruf "I" hilang) — hanya bila warnanya
   juga ada sebagai bidang tebal di dekatnya dan kedua sisinya latar yang sama.
@@ -67,6 +76,7 @@ npm run build   # wajib lolos sebelum commit
   dan memberi tiap bentuk warna palet raster terbanyak di piksel yang benar-benar terlihat. Mode magenta
   dikecualikan (path latar magenta harus tetap magenta untuk disaring).
   Default kurva: spline (huruf/angka bulat halus); preset logo/flat tetap polygon.
+  `scaleSvg`: koordinat dibulatkan 1 desimal bila hasil ≥ 2000 px (ukuran file −10%, tak terlihat).
   Resolusi kerja maks 3200 px; filter bintik diskalakan dengan faktor upscale (`scaledSpeckle`).
 - `src/lib/vtracerOptions.ts` — `layerDifference: 2` WAJIB: bawaan vtracer (16) menggabungkan nuansa
   gelap yang sudah dipisah palet (ban hitam ↔ fender abu).
