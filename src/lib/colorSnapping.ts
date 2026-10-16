@@ -673,8 +673,13 @@ export function growTransparentSimilar(
           }
         }
         if (n < 2) continue;
-        const d = Math.hypot(original[p] - sr / n, original[p + 1] - sg / n, original[p + 2] - sb / n);
-        if (d <= maxDist) clear.push(p);
+        const mr = sr / n, mg = sg / n, mb = sb / n;
+        const d = Math.hypot(original[p] - mr, original[p + 1] - mg, original[p + 2] - mb);
+        // Halo gelap hasil penajaman JPEG di tepi objek: sedikit LEBIH GELAP dari latar transparan
+        // GELAP (gradien latar) di sebelahnya → ikut transparan agar tidak menjadi garis/bercak gelap.
+        // Di sebelah gradien terang (pad chip emas) garis gelap adalah detail → dipertahankan.
+        const darker = mr + mg + mb < 300 && original[p] + original[p + 1] + original[p + 2] < mr + mg + mb;
+        if (d <= maxDist || (darker && d <= maxDist * 1.6)) clear.push(p);
       }
     }
     if (clear.length === 0) break;

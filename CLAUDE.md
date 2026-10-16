@@ -35,6 +35,15 @@ npm run build   # wajib lolos sebelum commit
   seperti muka kotak/bumper ditolak) dan tanpa lompatan stop tajam. Masker dicek ulang di resolusi
   kerja: piksel > 50 RGB dari prediksi (struktur ≥ 12 px, mis. garis 1 px) tetap di lapisan datar.
   Peringatan "pita warna" hanya untuk area gagal-fit ≥ 0.15% piksel.
+  Area BESAR (≥ 8× minArea) yang "didominasi satu warna" (latar kartu gelap 25→46) tetap dicoba: diterima
+  hanya sebagai gradien LINEAR yang menjelaskan ≥ 60% variasinya (`MODE_R2`) — radial pada bentuk bulat
+  datar (ban) mengaburkan cincin tajam. Tanpa ini latar halus terkuantisasi menjadi 2 warna dengan batas
+  bergerigi mengikuti derau JPEG ("seperti sapuan kuas"). Area hampir-datar yang terpotong garis tipis
+  dari area gradien (bidang di dalam chevron) ikut gradien itu bila galatnya ≤ `ABSORB_RMSE`.
+  `clearFlatMatchingGradients` (setelah snapping): piksel datar di atas gradien GELAP yang cocok/lebih
+  gelap sedikit dari gradien PALING ATAS di titik itu dibuat transparan (bercak halo di sela huruf kecil);
+  `growTransparentSimilar` juga menyerap halo yang sedikit lebih gelap — keduanya hanya di sebelah gradien
+  gelap (garis kontak chip emas harus tetap).
 - `src/lib/colorSnapping.ts` — palet: warna dianggap berbeda bila ΔE76 ≥ `PALETTE_MIN_DELTA_E` (6);
   `snapEdgesToLocalColors` membatasi piksel anti-aliasing ke warna yang ada di sekitarnya (anti-halo);
   piksel tepi yang lebih mirip latar transparan (area gradien/background) dibuat transparan, dan piksel

@@ -32,6 +32,7 @@ import {
   detectGradientRegions,
   punchGradientRegions,
   regionMaskToRgba,
+  clearFlatMatchingGradients,
   GradientRegion,
 } from './gradientDetect';
 import { injectGradients, gradientStopColors } from './gradientSvg';
@@ -661,6 +662,7 @@ export function loadImageToCanvas(
           Math.max(2, Math.min(5, Math.round(effectiveScale * 1.5)))
         );
         growTransparentSimilar(workingImageData, preSnap, 2, 30);
+        clearFlatMatchingGradients(workingImageData, preSnap, gradientRegions);
         mergeThinRims(workingImageData, Math.max(1.5, effectiveScale * 0.9), 70);
         unifyGlyphColors(workingImageData, effectiveScale, preSnap);
         if (config.smoothEdges !== false) majorityFilter(workingImageData, 2);

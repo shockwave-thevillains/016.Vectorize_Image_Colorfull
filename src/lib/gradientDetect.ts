@@ -82,6 +82,8 @@ const JOIN_T = 3.2; // ΔE maksimum antar tetangga (ter-blur) agar digabung
 const RAW_JOIN_T = 4.5; // ΔE maksimum antar tetangga (asli) — dua warna datar yang mirip TIDAK boleh menyatu
 const WITHIN_RATIO = 0.7; // model gradien kelompok harus menjelaskan ≥ 30% variasi di dalam bagian
 const DETAIL_T = 50; // selisih RGB dari prediksi gradien (resolusi kerja) agar piksel tetap detail datar
+const MODE_R2 = 0.6; // area besar "hampir satu warna" diterima sebagai gradien bila model menjelaskan ≥ 60% variasi
+const ABSORB_RMSE = 6; // area datar terpotong garis boleh ikut gradien tetangga bila galat ≤ ini
 const GROW_T = 18; // selisih warna maks. (RGB) agar piksel sisa diserap area gradien tetangganya
 const MAX_SPLIT_DEPTH = 3; // area gagal di-fit dipecah paling banyak 3 tingkat (≤ 8 sub-area)
 const RAW_EDGE_T = 8; // langkah ΔE asli di atas ini = tepi tajam
@@ -731,6 +733,7 @@ export function detectGradientRegions(img: Pixels, opts: GradientDetectOptions =
 
     // Area yang didominasi satu warna datar (mis. ban hitam + sedikit tepi) BUKAN gradien:
     // bila ≥ 55% piksel berada dekat warna terbanyak, serahkan ke lapisan warna datar.
+    let modeDominated = false;
     if (!group) {
       const bins = new Map<number, number>();
       for (const p of px) {
@@ -746,8 +749,13 @@ export function detectGradientRegions(img: Pixels, opts: GradientDetectOptions =
         if (Math.abs(((k >> 10) & 31) - mr0) <= 1 && Math.abs(((k >> 5) & 31) - mg0) <= 1 && Math.abs((k & 31) - mb0) <= 1) near += c;
       }
       if (near / n >= 0.55) {
-        nearFlat.push({ px, mean: [mr, mg, mb] });
-        continue;
+        // Area besar bergradasi sangat halus (latar kartu gelap 25→46) juga tampak "satu warna";
+        // tetap dicoba di-fit dan diterima hanya bila gradasi menjelaskan sebagian besar variasinya.
+        if (n < minArea * 8) {
+          nearFlat.push({ px, mean: [mr, mg, mb] });
+          continue;
+        }
+        modeDominated = true;
       }
     }
 
@@ -890,7 +898,19 @@ export function detectGradientRegions(img: Pixels, opts: GradientDetectOptions =
     let best = lin || rad!;
     if (lin && rad && rad.rmse < lin.rmse * 0.85) best = rad;
 
-    if (best.span < 14) continue; // perubahan warna terlalu kecil → anggap datar
+    if (best.span < 14) {
+      if (modeDominated) nearFlat.push({ px, mean: [mr, mg, mb] });
+      continue; // perubahan warna terlalu kecil → anggap datar
+    }
+    if (modeDominated) {
+      const varTotal = (cov[0] + cov[4] + cov[8]) / 3;
+      // hanya gradasi LINEAR (bayangan latar yang lebar); radial pada bentuk bulat datar (ban) akan
+      // mengaburkan cincin tajam di dalamnya
+      if (best.spec.type !== 'linear' || best.edgeLike || 1 - (best.rmse * best.rmse) / Math.max(1e-6, varTotal) < MODE_R2) {
+        nearFlat.push({ px, mean: [mr, mg, mb] });
+        continue;
+      }
+    }
     if (group && (isSteep(best.spec) || !explainsWithinParts(best.spec, parts!))) continue;
     if (best.edgeLike || best.rmse > maxRmse || best.badFraction > 0.05) {
       if (!group && !splitRegion(px, s, depth)) noteFallback(px);
@@ -951,6 +971,49 @@ export function detectGradientRegions(img: Pixels, opts: GradientDetectOptions =
         queue.push({ px, depth: MAX_SPLIT_DEPTH, group: true, parts: ks.map((k) => items[k].px) });
       }
       if (queue.length > 0) runQueue();
+    }
+  }
+
+  // --- 4c. Area hampir-datar yang terpotong garis tipis dari area gradien yang diterima (mis. bidang di
+  //         dalam chevron emas pada latar kartu) dan warnanya cocok dengan model gradien itu → ikut
+  //         area tersebut, garisnya tetap detail datar di atas gradien.
+  if (accepted.length > 0 && nearFlat.length > 0) {
+    const lab = new Int32Array(total).fill(-1);
+    accepted.forEach((a, gi) => { for (const p of a.pixels) lab[p] = gi; });
+    const pred = new Float64Array(3);
+    const R = 6;
+    for (const it of nearFlat) {
+      if (lab[it.px[0]] >= 0) continue; // sudah menjadi bagian area kelompok
+      const own = new Set<number>();
+      const votes = new Map<number, number>();
+      for (const p of it.px) own.add(p);
+      for (const p of it.px) {
+        const x = p % w, y = (p / w) | 0;
+        if (x > 0 && x + 1 < w && y > 0 && y + 1 < h && own.has(p - 1) && own.has(p + 1) && own.has(p - w) && own.has(p + w)) continue;
+        let found = -1;
+        for (let dy = -R; dy <= R && found < 0; dy++) {
+          const yy = y + dy;
+          if (yy < 0 || yy >= h) continue;
+          for (let dx = -R; dx <= R; dx++) {
+            const xx = x + dx;
+            if (xx < 0 || xx >= w) continue;
+            const g = lab[yy * w + xx];
+            if (g >= 0) { found = g; break; }
+          }
+        }
+        if (found >= 0) votes.set(found, (votes.get(found) ?? 0) + 1);
+      }
+      if (votes.size === 0) continue;
+      let gi = -1, gv = -1;
+      for (const [g, v] of votes) if (v > gv) { gv = v; gi = g; }
+      let se = 0;
+      for (const p of it.px) {
+        predictAt(accepted[gi].spec, p, pred);
+        const i = p * 4;
+        se += ((data[i] - pred[0]) ** 2 + (data[i + 1] - pred[1]) ** 2 + (data[i + 2] - pred[2]) ** 2) / 3;
+      }
+      if (Math.sqrt(se / it.px.length) > ABSORB_RMSE) continue;
+      for (const p of it.px) { lab[p] = gi; accepted[gi].pixels.push(p); }
     }
   }
 
@@ -1307,4 +1370,54 @@ export function regionMaskToRgba(r: GradientRegion): { rgba: Uint8ClampedArray; 
     }
   }
   return { rgba, width: W, height: H, pad };
+}
+
+/**
+ * Piksel lapisan datar yang berada DI ATAS path gradien gelap (dalam fillMask) dan warna aslinya cocok dengan
+ * warna gradien di titik itu (atau sedikit lebih gelap: bayangan/halo JPEG di sekitar teks) dibuat
+ * transparan, sehingga gradien di bawahnya yang tampil. Tanpa ini, bercak gelap di sela huruf kecil
+ * di atas latar bergradasi menjadi potongan gelap yang memotong huruf. Detail yang kontras (teks,
+ * garis emas) tidak terpengaruh.
+ */
+export function clearFlatMatchingGradients(
+  img: Pixels,
+  original: Uint8ClampedArray | Uint8Array,
+  regions: GradientRegion[],
+  maxDist = 30,
+  darkDist = 48
+): void {
+  // Hanya gradien PALING ATAS di tiap piksel yang akan terlihat bila piksel datar dihapus (urutan
+  // `regions` = urutan tumpukan path, indeks terbesar paling atas). Lubang huruf "O" berada di atas
+  // latar bergradasi tetapi di bawah gradien emas hurufnya → dibandingkan dengan emas, tidak dihapus.
+  const W = img.width, H = img.height;
+  const top = new Int16Array(W * H).fill(-1);
+  regions.forEach((r, ri) => {
+    for (let Y = 0; Y < r.h; Y++) {
+      for (let X = 0; X < r.w; X++) {
+        if (r.fillMask[Y * r.w + X]) top[(r.y0 + Y) * W + r.x0 + X] = ri;
+      }
+    }
+  });
+  const pred = new Float64Array(3);
+  for (let p = 0; p < W * H; p++) {
+    const ri = top[p];
+    if (ri < 0) continue;
+    const i = p * 4;
+    if (img.data[i + 3] < 30) continue;
+    const r = regions[ri];
+    const m = r.spec.matrix;
+    const det = m[0] * m[3] - m[1] * m[2];
+    if (Math.abs(det) < 1e-9) continue;
+    const x = p % W, y = (p / W) | 0;
+    const dx = x + 0.5 - m[4], dy = y + 0.5 - m[5];
+    const qx = (m[3] * dx - m[2] * dy) / det, qy = (-m[1] * dx + m[0] * dy) / det;
+    evalStops(r.spec.stops, r.spec.type === 'linear' ? qx : Math.hypot(qx, qy), pred);
+    const d = Math.hypot(original[i] - pred[0], original[i + 1] - pred[1], original[i + 2] - pred[2]);
+    // Hanya di atas gradien GELAP (latar kartu: bercak/halo JPEG di sekitar teks). Pada gradien terang
+    // (pad chip emas) tepi lembut garis kontak harus tetap menjadi bagian garis.
+    const predSum = pred[0] + pred[1] + pred[2];
+    if (predSum >= 300) continue;
+    const darker = original[i] + original[i + 1] + original[i + 2] < predSum;
+    if (d <= maxDist || (darker && d <= darkDist)) img.data[i + 3] = 0;
+  }
 }
