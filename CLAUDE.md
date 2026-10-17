@@ -93,8 +93,19 @@ npm run build   # wajib lolos sebelum commit
   bingkai = garis lurus persis) → per rantai: titik tengah tepi, haluskan ringan, poligon optimal
   (Selinger/Potrace, ditulis ulang; tol 0,4+0,05×skala), `straighten` (sisi panjang ≥ 8×skala yang riak
   ≤ 0,55×skala+0,4 diluruskan — tepi diagonal bergerigi dari sumber), simpul digeser ke perpotongan garis
-  kuadrat-terkecil (≤ 0,75 px), `collapseChamfers` (1–3 sisi pendek di sudut membulat → satu sudut),
-  potongan ala potrace (alphamax 0,9 + belokan ≥ 40° = sudut) → `mergePieces` (fit ulang Schneider).
+  kuadrat-terkecil (≤ 0,75 px), `collapseChamfers` (1–3 sisi pendek di sudut membulat → satu sudut; titik
+  awal rantai tertutup diputar ke simpul di antara dua sisi terpanjang dulu) → `fitPrimitives` (PRIMITIF
+  GEOMETRIS — permintaan user: hasil harus garis lurus/busur/lingkaran, bukan "seperti dilukis"):
+  rantai tertutup dicoba dulu sebagai lingkaran/elips utuh (Kåsa / Halir-Flusser; toleransi
+  min(straightTol, 0,08·r+0,4) — bentuk tipis seperti "I" tidak lolos); lainnya per bentang (diputus di
+  ujung rantai & belokan ≥ 120°) dengan DP jumlah potongan minimum: garis (`linePrim`, dikunci
+  mendatar/tegak bila ≤ 3°; ditolak bila melengkung ke satu sisi — `bowOf`), busur (`arcPrim`, toleransi
+  0,65× lebih ketat, lengkung harus menjelaskan bentuk), kurva bebas hanya bila tak ada yang muat (biaya
+  1 + 1,2/sisi; tak boleh melintasi simpul ≥ 55° supaya gerigi tetap tajam; dibentuk ala potrace lewat
+  titik tengah sisi lalu Schneider). Garis pendek (< 4×skala) mahal. `mergeLineRuns`: deret garis
+  berbelok kecil (3–22°) → busur/kurva (oval tidak bersegi). Sudut muncul dari beda arah singgung > 22°
+  (perpotongan); sambungan mulus memakai titik singgung (busur di antara dua garis = fillet bila sapuan
+  = belokan) dan singgung bersama untuk kurva bebas; patahan sisa > 4° → busurnya jadi kurva bebas.
   Path per warna (urut luas total, terbesar paling bawah, fill nonzero); bentuk bawah memakai versi
   rantai yang digeser ≤ 1 px ke bentuk atas (anti garis rambut). Uji cepat tanpa browser:
   `node --experimental-strip-types` + `traceContoursToSvg` pada RGBA mentah.

@@ -62,6 +62,7 @@ interface Chain {
 
 const DIR_X = [1, 0, -1, 0];
 const MIN_CORNER_TURN = (40 * Math.PI) / 180;
+const ARC_TOL = 0.65;
 const DIR_Y = [0, 1, 0, -1];
 
 // ───────────────────────────── 1. Area ─────────────────────────────
@@ -552,8 +553,8 @@ interface FitParams {
   spline: boolean;
   /** Toleransi poligon: jarak maks titik batas ke sisi poligon (px kerja). */
   polyTol: number;
-  /** Toleransi penggabungan kurva berurutan menjadi satu kubik (px kerja). */
-  mergeTol: number;
+  /** Toleransi primitif geometris (garis, busur, lingkaran/elips) dalam px kerja. */
+  primTol: number;
   /** Ambang sudut ala potrace (alphamax): makin kecil makin banyak sudut tajam. */
   alphaMax: number;
   smoothIters: number;
@@ -828,6 +829,11 @@ function straighten(q: Float64Array, idx: number[], tol: number, minLen: number)
       const ax = q[a * 2], ay = q[a * 2 + 1], bx = q[b * 2], by = q[b * 2 + 1];
       const len = Math.hypot(bx - ax, by - ay);
       if (len < minLen) continue;
+      // hanya riak (belokan kecil), bukan sudut
+      const v = out[i];
+      const ux = q[v * 2] - ax, uy = q[v * 2 + 1] - ay, wx = bx - q[v * 2], wy = by - q[v * 2 + 1];
+      const cosT = (ux * wx + uy * wy) / (Math.hypot(ux, uy) * Math.hypot(wx, wy) || 1);
+      if (cosT < Math.cos((30 * Math.PI) / 180)) continue;
       let ok = true;
       for (let k = a + 1; k < b; k++) {
         const d = Math.abs((bx - ax) * (ay - q[k * 2 + 1]) - (ax - q[k * 2]) * (by - ay)) / len;
@@ -835,6 +841,11 @@ function straighten(q: Float64Array, idx: number[], tol: number, minLen: number)
           ok = false;
           break;
         }
+      }
+      if (ok) {
+        const seg = q.subarray(a * 2, b * 2 + 2) as Float64Array;
+        const [dx, dy] = norm(bx - ax, by - ay);
+        if (bowOf(seg, ax, ay, dx, dy) > Math.max(0.3, 0.3 * tol)) ok = false;
       }
       if (ok) {
         out.splice(i, 1);
@@ -959,7 +970,37 @@ function fitChain(ch: Chain, fp: FitParams, w: number, h: number): Seg[] {
     vx[N] = vx[0];
     vy[N] = vy[0];
   }
-  if (fp.spline) N = collapseChamfers(vx, vy, cyc, fp.chamfer);
+  let vq = idx.slice();
+  if (cyc && N >= 3) {
+    // Titik awal → simpul yang diapit dua sisi terpanjang (bukan di tengah sudut membulat), supaya
+    // pemulihan sudut tidak perlu melintasi titik awal.
+    let k0 = 0, best = -1;
+    for (let i = 0; i < N; i++) {
+      const ip = (i - 1 + N) % N;
+      const l = Math.min(Math.hypot(vx[i + 1] - vx[i], vy[i + 1] - vy[i]), Math.hypot(vx[ip + 1] - vx[ip], vy[ip + 1] - vy[ip]));
+      if (l > best) {
+        best = l;
+        k0 = i;
+      }
+    }
+    if (k0 > 0) {
+      const period = m - 1;
+      const rx: number[] = [], ry: number[] = [], rq: number[] = [];
+      for (let j = 0; j < N; j++) {
+        const o = (k0 + j) % N;
+        rx.push(vx[o]);
+        ry.push(vy[o]);
+        rq.push(vq[o] + (k0 + j >= N ? period : 0));
+      }
+      rx.push(rx[0]);
+      ry.push(ry[0]);
+      rq.push(rq[0] + period);
+      vx.splice(0, vx.length, ...rx);
+      vy.splice(0, vy.length, ...ry);
+      vq = rq;
+    }
+  }
+  if (fp.spline) N = collapseChamfers(vx, vy, vq, cyc, fp.chamfer);
 
   if (!fp.spline || N < 2) {
     const segs: Seg[] = [];
@@ -968,54 +1009,7 @@ function fitChain(ch: Chain, fp: FitParams, w: number, h: number): Seg[] {
     }
     return segs;
   }
-
-  // Potongan ala potrace: sudut → dua garis lewat simpul; selain itu kubik dari titik tengah sisi
-  // ke titik tengah sisi berikutnya dengan pegangan α ke arah simpul.
-  interface Piece {
-    p: number[];
-    line: boolean;
-    hardStart: boolean;
-    hardEnd: boolean;
-  }
-  const pieces: Piece[] = [];
-  const mid = (i: number): [number, number] => [(vx[i] + vx[i + 1]) / 2, (vy[i] + vy[i + 1]) / 2];
-  const pushVertex = (i: number) => {
-    // simpul i (0<i<N, atau siklis) di antara sisi i-1 dan i
-    const ip = (i - 1 + N) % N;
-    const inx = (i + 1) % (cyc ? N : N + 1);
-    const p0x = vx[ip], p0y = vy[ip], v1x = vx[i], v1y = vy[i];
-    const p2x = cyc ? vx[inx] : vx[i + 1], p2y = cyc ? vy[inx] : vy[i + 1];
-    const [m0x, m0y] = mid(ip);
-    const [m1x, m1y] = mid(i);
-    const l1 = Math.abs(p2x - p0x) + Math.abs(p2y - p0y);
-    const dd = l1 < 1e-9 ? 0 : Math.abs((v1x - p0x) * (p2y - p0y) - (v1y - p0y) * (p2x - p0x)) / l1;
-    let alpha = dd > 1 ? (1 - 1 / dd) / 0.75 : 0;
-    // Belokan kecil di antara sisi panjang (lengkung landai yang diluruskan) tetap kurva.
-    const ax = v1x - p0x, ay = v1y - p0y, bx = p2x - v1x, by = p2y - v1y;
-    const turn = Math.acos(Math.max(-1, Math.min(1, (ax * bx + ay * by) / (Math.hypot(ax, ay) * Math.hypot(bx, by) || 1))));
-    if (alpha >= fp.alphaMax && turn >= MIN_CORNER_TURN) {
-      pieces.push({ p: [m0x, m0y, 0, 0, 0, 0, v1x, v1y], line: true, hardStart: false, hardEnd: true });
-      pieces.push({ p: [v1x, v1y, 0, 0, 0, 0, m1x, m1y], line: true, hardStart: true, hardEnd: false });
-    } else {
-      alpha = Math.max(0.55, Math.min(1, alpha));
-      pieces.push({
-        p: [m0x, m0y, m0x + alpha * (v1x - m0x), m0y + alpha * (v1y - m0y), m1x + alpha * (v1x - m1x), m1y + alpha * (v1y - m1y), m1x, m1y],
-        line: false,
-        hardStart: false,
-        hardEnd: false,
-      });
-    }
-  };
-  if (cyc) {
-    for (let i = 0; i < N; i++) pushVertex(i);
-  } else {
-    const [m0x, m0y] = mid(0);
-    pieces.push({ p: [vx[0], vy[0], 0, 0, 0, 0, m0x, m0y], line: true, hardStart: true, hardEnd: false });
-    for (let i = 1; i < N; i++) pushVertex(i);
-    const [mlx, mly] = mid(N - 1);
-    pieces.push({ p: [mlx, mly, 0, 0, 0, 0, vx[N], vy[N]], line: true, hardStart: false, hardEnd: true });
-  }
-  return mergePieces(pieces, cyc, fp.mergeTol);
+  return fitPrimitives(q, m, vx, vy, vq, cyc, fp);
 }
 
 /**
@@ -1024,21 +1018,19 @@ function fitChain(ch: Chain, fp: FitParams, w: number, h: number): Seg[] {
  * panjang, sehingga sudut tajam huruf/bidang kembali tajam. Ujung goresan (dua sisi sejajar) dan
  * lengkungan (banyak sisi pendek berturut-turut) tidak tersentuh. Mengubah vx/vy; hasil = jumlah sisi.
  */
-function collapseChamfers(vx: number[], vy: number[], cyclic: boolean, maxLen: number): number {
+function collapseChamfers(vx: number[], vy: number[], vq: number[], cyclic: boolean, maxLen: number): number {
   let N = vx.length - 1;
   const len = (i: number) => Math.hypot(vx[i + 1] - vx[i], vy[i + 1] - vy[i]);
   for (let s = 0; s < N; s++) {
     for (let r = 1; r <= 3; r++) {
-      // deret sisi s..s+r-1 (pendek) di antara sisi a dan b (panjang)
-      if (N < (cyclic ? r + 3 : r + 2)) break;
-      const a = cyclic ? (s - 1 + N) % N : s - 1;
-      const b = cyclic ? (s + r) % N : s + r;
-      if (a < 0 || b >= N || (!cyclic && s + r > N - 1)) break;
+      // deret sisi s..s+r-1 (pendek) di antara sisi a dan b (panjang); tidak melewati titik awal
+      const a = s - 1 >= 0 ? s - 1 : cyclic ? N - 1 : -1;
+      const b = s + r;
+      if (a < 0 || b >= N || N < r + 3) break;
       let run = 0;
       let short = true;
       for (let k = 0; k < r; k++) {
-        const e = cyclic ? (s + k) % N : s + k;
-        const l = len(e);
+        const l = len(s + k);
         run += l;
         if (l > maxLen) short = false;
       }
@@ -1053,115 +1045,740 @@ function collapseChamfers(vx: number[], vy: number[], cyclic: boolean, maxLen: n
       if (Math.abs(den) < 1e-9) continue;
       const t = ((vx[b] - vx[a]) * by - (vy[b] - vy[a]) * bx) / den;
       const ix = vx[a] + t * ax, iy = vy[a] + t * ay;
-      const sx = vx[a + 1], sy = vy[a + 1];
-      if (Math.hypot(ix - sx, iy - sy) > 1.5 * run + 0.5) continue;
-      // simpul a+1 .. b (r+1 simpul) → satu simpul di perpotongan
-      const verts: number[] = [];
-      for (let k = 0; k <= r; k++) verts.push(cyclic ? (s + k) % N : s + k);
-      const keep = verts[0];
-      const drop = new Set(verts.slice(1));
-      const nx: number[] = [], ny: number[] = [];
-      const lastIdx = cyclic ? N : N + 1;
-      for (let i = 0; i < lastIdx; i++) {
-        if (drop.has(i)) continue;
-        if (i === keep) {
-          nx.push(ix);
-          ny.push(iy);
-        } else {
-          nx.push(vx[i]);
-          ny.push(vy[i]);
-        }
-      }
-      if (cyclic) {
-        nx.push(nx[0]);
-        ny.push(ny[0]);
-      }
-      vx.length = 0;
-      vy.length = 0;
-      vx.push(...nx);
-      vy.push(...ny);
+      if (Math.hypot(ix - vx[s], iy - vy[s]) > 1.5 * run + 0.5) continue;
+      // simpul s..s+r → satu simpul di perpotongan
+      vx.splice(s, r + 1, ix);
+      vy.splice(s, r + 1, iy);
+      vq.splice(s, r + 1, Math.round((vq[s] + vq[s + r]) / 2));
       N = vx.length - 1;
+      if (cyclic && s === 0) {
+        vx[N] = vx[0];
+        vy[N] = vy[0];
+      }
       break;
     }
   }
   return N;
 }
 
+// ───────────────────────────── 3b. Primitif geometris ─────────────────────────────
+
+type Prim =
+  | { t: 'line'; px: number; py: number; dx: number; dy: number }
+  | { t: 'arc'; cx: number; cy: number; r: number; sweep: number; res: number }
+  | { t: 'bez' };
+
 /**
- * Gabungkan potongan berurutan: garis segaris → satu garis; deret kubik mulus → di-fit ulang
- * (Schneider) dengan toleransi kecil, sehingga jumlah simpul turun tanpa mengubah bentuk.
+ * Lengkungan sistematis titik terhadap garis (px): rata-rata simpangan bertanda sepertiga tengah
+ * dikurangi rata-rata sepertiga awal & akhir. Tepi lurus beriak ≈ 0; lengkung landai ≈ ¾ tinggi busur.
  */
-function mergePieces(pieces: Seg[], cyclic: boolean, tol: number): Seg[] {
-  const out: Seg[] = [];
-  // Rantai tertutup yang seluruhnya mulus: putar agar titik awal = awal garis/sudut bila ada.
-  let start = 0;
-  if (cyclic) {
-    let k = pieces.findIndex((p) => p.hardStart);
-    if (k < 0) k = pieces.findIndex((p) => p.line);
-    start = k >= 0 ? k : 0;
+function bowOf(pts: Float64Array, px: number, py: number, dx: number, dy: number): number {
+  const n = pts.length / 2;
+  if (n < 6) return 0;
+  const t = Math.floor(n / 3);
+  let a = 0, b = 0, c = 0;
+  for (let i = 0; i < n; i++) {
+    const d = (pts[i * 2] - px) * dy - (pts[i * 2 + 1] - py) * dx;
+    if (i < t) a += d;
+    else if (i >= n - t) c += d;
+    else b += d;
   }
-  const P = start === 0 ? pieces : pieces.slice(start).concat(pieces.slice(0, start));
-  let i = 0;
-  while (i < P.length) {
-    const p = P[i];
-    if (p.line) {
-      let j = i;
-      // garis segaris berturut-turut
-      while (
-        j + 1 < P.length &&
-        P[j + 1].line &&
-        !P[j].hardEnd &&
-        collinear(p.p[0], p.p[1], P[j + 1].p[6], P[j + 1].p[7], P[j].p[6], P[j].p[7], tol)
-      )
-        j++;
-      out.push({ p: [p.p[0], p.p[1], 0, 0, 0, 0, P[j].p[6], P[j].p[7]], line: true, hardStart: p.hardStart, hardEnd: P[j].hardEnd });
-      i = j + 1;
-      continue;
+  return Math.abs(b / (n - 2 * t) - (a + c) / (2 * t));
+}
+
+/** Garis kuadrat-terkecil; garis yang hampir mendatar/tegak dikunci ke sumbu bila masih muat. */
+function linePrim(pts: Float64Array, tol: number): Prim | null {
+  const n = pts.length / 2;
+  let mx = 0, my = 0;
+  for (let i = 0; i < n; i++) {
+    mx += pts[i * 2];
+    my += pts[i * 2 + 1];
+  }
+  mx /= n;
+  my /= n;
+  let xx = 0, xy = 0, yy = 0;
+  for (let i = 0; i < n; i++) {
+    const dx = pts[i * 2] - mx, dy = pts[i * 2 + 1] - my;
+    xx += dx * dx;
+    xy += dx * dy;
+    yy += dy * dy;
+  }
+  const ang = 0.5 * Math.atan2(2 * xy, xx - yy);
+  const maxDev = (dx: number, dy: number) => {
+    let m = 0;
+    for (let i = 0; i < n; i++) {
+      const d = Math.abs((pts[i * 2] - mx) * dy - (pts[i * 2 + 1] - my) * dx);
+      if (d > m) m = d;
     }
-    let j = i;
-    while (j + 1 < P.length && !P[j + 1].line && !P[j].hardEnd) j++;
-    const run = P.slice(i, j + 1);
-    const all = cyclic && run.length === P.length;
-    if (run.length === 1) out.push(p);
-    else if (all) {
-      // lingkaran penuh: dua bagian supaya titik awal ≠ titik akhir
-      const h = Math.floor(run.length / 2);
-      out.push(...refit(run.slice(0, h), tol), ...refit(run.slice(h), tol));
-    } else out.push(...refit(run, tol));
-    i = j + 1;
+    return m;
+  };
+  let dx = Math.cos(ang), dy = Math.sin(ang);
+  if (maxDev(dx, dy) > tol) return null;
+  // melengkung ke satu sisi → bukan garis (biar busur yang mengambil)
+  if (bowOf(pts, mx, my, dx, dy) > Math.max(0.3, 0.3 * tol)) return null;
+  const q = Math.round(ang / (Math.PI / 2)) * (Math.PI / 2);
+  if (Math.abs(ang - q) < (3 * Math.PI) / 180) {
+    const sx = Math.round(Math.cos(q)), sy = Math.round(Math.sin(q));
+    if (maxDev(sx, sy) <= tol) {
+      dx = sx;
+      dy = sy;
+    }
+  }
+  return { t: 'line', px: mx, py: my, dx, dy };
+}
+
+/** Lingkaran (Kåsa + penyempurnaan geometris) atas titik. */
+function fitCircle(pts: Float64Array): [number, number, number] | null {
+  const n = pts.length / 2;
+  if (n < 3) return null;
+  let mx = 0, my = 0;
+  for (let i = 0; i < n; i++) {
+    mx += pts[i * 2];
+    my += pts[i * 2 + 1];
+  }
+  mx /= n;
+  my /= n;
+  let suu = 0, svv = 0, suv = 0, suuu = 0, svvv = 0, suvv = 0, svuu = 0;
+  for (let i = 0; i < n; i++) {
+    const u = pts[i * 2] - mx, v = pts[i * 2 + 1] - my;
+    suu += u * u;
+    svv += v * v;
+    suv += u * v;
+    suuu += u * u * u;
+    svvv += v * v * v;
+    suvv += u * v * v;
+    svuu += v * u * u;
+  }
+  const det = suu * svv - suv * suv;
+  if (Math.abs(det) < 1e-9) return null;
+  const b1 = 0.5 * (suuu + suvv), b2 = 0.5 * (svvv + svuu);
+  let cx = (b1 * svv - b2 * suv) / det + mx;
+  let cy = (suu * b2 - suv * b1) / det + my;
+  let r = 0;
+  for (let it = 0; it < 6; it++) {
+    r = 0;
+    for (let i = 0; i < n; i++) r += Math.hypot(pts[i * 2] - cx, pts[i * 2 + 1] - cy);
+    r /= n;
+    let gx = 0, gy = 0;
+    for (let i = 0; i < n; i++) {
+      const dx = pts[i * 2] - cx, dy = pts[i * 2 + 1] - cy;
+      const d = Math.hypot(dx, dy) || 1;
+      gx += ((d - r) * dx) / d;
+      gy += ((d - r) * dy) / d;
+    }
+    cx += gx / n;
+    cy += gy / n;
+  }
+  return Number.isFinite(r) ? [cx, cy, r] : null;
+}
+
+function arcPrim(pts: Float64Array, tol: number, ax: number, ay: number, bx: number, by: number): Prim | null {
+  const n = pts.length / 2;
+  if (n < 6) return null;
+  // cukup melengkung? (kalau tidak, garis lebih tepat)
+  const cl = Math.hypot(bx - ax, by - ay);
+  let sag = 0;
+  for (let i = 0; i < n; i++) {
+    const d = cl < 1e-9 ? 0 : Math.abs((bx - ax) * (ay - pts[i * 2 + 1]) - (ax - pts[i * 2]) * (by - ay)) / cl;
+    if (d > sag) sag = d;
+  }
+  if (sag < tol * 0.8) return null;
+  const c = fitCircle(pts);
+  if (!c) return null;
+  const [cx, cy, r] = c;
+  if (r < 1 || r > 50 * Math.max(cl, 1)) return null;
+  let res = 0;
+  for (let i = 0; i < n; i++) {
+    const d = Math.abs(Math.hypot(pts[i * 2] - cx, pts[i * 2 + 1] - cy) - r);
+    if (d > tol) return null;
+    if (d > res) res = d;
+  }
+  // Lengkungan harus menjelaskan bentuknya: galat jauh lebih kecil dari tinggi busur (kalau tidak,
+  // itu garis lurus + sudut yang kebetulan muat busur landai).
+  const half = Math.min(r, cl / 2);
+  const arcSag = r - Math.sqrt(Math.max(0, r * r - half * half));
+  if (res > 0.5 * arcSag && arcSag < 2 * tol) return null;
+  for (const [x, y] of [[ax, ay], [bx, by]]) if (Math.abs(Math.hypot(x - cx, y - cy) - r) > tol * 1.5) return null;
+  // sapuan sudut (harus searah)
+  let sweep = 0;
+  let prev = Math.atan2(pts[1] - cy, pts[0] - cx);
+  let back = 0;
+  for (let i = 1; i < n; i++) {
+    const a = Math.atan2(pts[i * 2 + 1] - cy, pts[i * 2] - cx);
+    let d = a - prev;
+    if (d > Math.PI) d -= 2 * Math.PI;
+    else if (d < -Math.PI) d += 2 * Math.PI;
+    sweep += d;
+    if (d * sweep < 0) back += Math.abs(d);
+    prev = a;
+  }
+  if (Math.abs(sweep) > 1.9 * Math.PI || back > 0.35 + Math.abs(sweep) * 0.15) return null;
+  return { t: 'arc', cx, cy, r, sweep, res };
+}
+
+/**
+ * Elips (Halir & Flusser 1998, kuadrat-terkecil langsung) → [cx, cy, a, b, φ] atau null.
+ */
+function fitEllipse(pts: Float64Array): [number, number, number, number, number] | null {
+  const n = pts.length / 2;
+  if (n < 8) return null;
+  let mx = 0, my = 0;
+  for (let i = 0; i < n; i++) {
+    mx += pts[i * 2];
+    my += pts[i * 2 + 1];
+  }
+  mx /= n;
+  my /= n;
+  let sc = 0;
+  for (let i = 0; i < n; i++) sc += Math.hypot(pts[i * 2] - mx, pts[i * 2 + 1] - my);
+  sc = sc / n || 1;
+  const S1 = [0, 0, 0, 0, 0, 0, 0, 0, 0], S2 = [0, 0, 0, 0, 0, 0, 0, 0, 0], S3 = [0, 0, 0, 0, 0, 0, 0, 0, 0];
+  for (let i = 0; i < n; i++) {
+    const x = (pts[i * 2] - mx) / sc, y = (pts[i * 2 + 1] - my) / sc;
+    const d1 = [x * x, x * y, y * y], d2 = [x, y, 1];
+    for (let r = 0; r < 3; r++) {
+      for (let c = 0; c < 3; c++) {
+        S1[r * 3 + c] += d1[r] * d1[c];
+        S2[r * 3 + c] += d1[r] * d2[c];
+        S3[r * 3 + c] += d2[r] * d2[c];
+      }
+    }
+  }
+  const inv3 = (M: number[]): number[] | null => {
+    const [a, b, c, d, e, f, g, h, k] = M;
+    const A = e * k - f * h, B = -(d * k - f * g), C = d * h - e * g;
+    const det = a * A + b * B + c * C;
+    if (Math.abs(det) < 1e-12) return null;
+    return [A / det, -(b * k - c * h) / det, (b * f - c * e) / det, B / det, (a * k - c * g) / det, -(a * f - c * d) / det, C / det, -(a * h - b * g) / det, (a * e - b * d) / det];
+  };
+  const mul = (A: number[], B: number[]) => {
+    const R = [0, 0, 0, 0, 0, 0, 0, 0, 0];
+    for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) for (let k = 0; k < 3; k++) R[r * 3 + c] += A[r * 3 + k] * B[k * 3 + c];
+    return R;
+  };
+  const tr = (A: number[]) => [A[0], A[3], A[6], A[1], A[4], A[7], A[2], A[5], A[8]];
+  const S3i = inv3(S3);
+  if (!S3i) return null;
+  const T = mul(S3i, tr(S2)).map((v) => -v);
+  const M0 = S1.map((v, i) => v + mul(S2, T)[i]);
+  // M = C1⁻¹ · M0, C1⁻¹ = [[0,0,½],[0,−1,0],[½,0,0]]
+  const M = [M0[6] / 2, M0[7] / 2, M0[8] / 2, -M0[3], -M0[4], -M0[5], M0[0] / 2, M0[1] / 2, M0[2] / 2];
+  // nilai eigen: akar polinomial karakteristik (kubik)
+  const [a, b, c, d, e, f, g, h, k] = M;
+  const p2 = -(a + e + k);
+  const p1 = a * e + a * k + e * k - b * d - c * g - f * h;
+  const p0 = -(a * (e * k - f * h) - b * (d * k - f * g) + c * (d * h - e * g));
+  const roots: number[] = [];
+  {
+    // x³ + p2 x² + p1 x + p0 = 0
+    const Q = (3 * p1 - p2 * p2) / 9, R = (9 * p2 * p1 - 27 * p0 - 2 * p2 * p2 * p2) / 54;
+    const D = Q * Q * Q + R * R;
+    if (D <= 0) {
+      const th = Math.acos(Math.max(-1, Math.min(1, R / Math.sqrt(-Q * Q * Q || 1e-30))));
+      const sq = 2 * Math.sqrt(-Q);
+      for (let j = 0; j < 3; j++) roots.push(sq * Math.cos((th + 2 * Math.PI * j) / 3) - p2 / 3);
+    } else {
+      const sD = Math.sqrt(D);
+      roots.push(Math.cbrt(R + sD) + Math.cbrt(R - sD) - p2 / 3);
+    }
+  }
+  let best: number[] | null = null;
+  for (const lam of roots) {
+    const r0 = [a - lam, b, c], r1 = [d, e - lam, f], r2 = [g, h, k - lam];
+    const cands = [
+      [r0[1] * r1[2] - r0[2] * r1[1], r0[2] * r1[0] - r0[0] * r1[2], r0[0] * r1[1] - r0[1] * r1[0]],
+      [r0[1] * r2[2] - r0[2] * r2[1], r0[2] * r2[0] - r0[0] * r2[2], r0[0] * r2[1] - r0[1] * r2[0]],
+      [r1[1] * r2[2] - r1[2] * r2[1], r1[2] * r2[0] - r1[0] * r2[2], r1[0] * r2[1] - r1[1] * r2[0]],
+    ];
+    let v = cands[0];
+    for (const cv of cands) if (Math.hypot(...cv) > Math.hypot(...v)) v = cv;
+    if (4 * v[0] * v[2] - v[1] * v[1] > 0) best = v;
+  }
+  if (!best) return null;
+  const a2 = [T[0] * best[0] + T[1] * best[1] + T[2] * best[2], T[3] * best[0] + T[4] * best[1] + T[5] * best[2], T[6] * best[0] + T[7] * best[1] + T[8] * best[2]];
+  const [A, B, C] = best;
+  const [D2, E2, F2] = a2;
+  const den = B * B - 4 * A * C;
+  if (den >= 0) return null;
+  const ux = (2 * C * D2 - B * E2) / den, uy = (2 * A * E2 - B * D2) / den;
+  const F0 = A * ux * ux + B * ux * uy + C * uy * uy + D2 * ux + E2 * uy + F2;
+  const phi = 0.5 * Math.atan2(B, A - C);
+  const cs = Math.cos(phi), sn = Math.sin(phi);
+  const Ap = A * cs * cs + B * cs * sn + C * sn * sn;
+  const Cp = A * sn * sn - B * cs * sn + C * cs * cs;
+  if (-F0 / Ap <= 0 || -F0 / Cp <= 0) return null;
+  const ra = Math.sqrt(-F0 / Ap) * sc, rb = Math.sqrt(-F0 / Cp) * sc;
+  return [ux * sc + mx, uy * sc + my, ra, rb, phi];
+}
+
+/** Busur (pusat, jari-jari) dari S ke E dengan sapuan mendekati `sweep` → kubik (≤ 90° per kubik). */
+function arcSegs(cx: number, cy: number, r: number, sweep: number, S: [number, number], E: [number, number]): number[][] {
+  const t0 = Math.atan2(S[1] - cy, S[0] - cx);
+  const t1 = Math.atan2(E[1] - cy, E[0] - cx);
+  let d = t1 - t0;
+  d -= Math.round((d - sweep) / (2 * Math.PI)) * 2 * Math.PI;
+  const k = Math.max(1, Math.ceil(Math.abs(d) / (Math.PI / 2) - 1e-6));
+  const out: number[][] = [];
+  for (let i = 0; i < k; i++) {
+    const a = t0 + (d * i) / k, b = t0 + (d * (i + 1)) / k;
+    const h = (4 / 3) * Math.tan((b - a) / 4) * r;
+    const p0 = [cx + r * Math.cos(a), cy + r * Math.sin(a)];
+    const p3 = [cx + r * Math.cos(b), cy + r * Math.sin(b)];
+    out.push([p0[0], p0[1], p0[0] - h * Math.sin(a), p0[1] + h * Math.cos(a), p3[0] + h * Math.sin(b), p3[1] - h * Math.cos(b), p3[0], p3[1]]);
+  }
+  // ujung persis di S/E (pegangan ikut bergeser → arah singgung tetap)
+  const f = out[0], l = out[out.length - 1];
+  const dsx = S[0] - f[0], dsy = S[1] - f[1];
+  f[0] += dsx; f[1] += dsy; f[2] += dsx; f[3] += dsy;
+  const dex = E[0] - l[6], dey = E[1] - l[7];
+  l[6] += dex; l[7] += dey; l[4] += dex; l[5] += dey;
+  return out;
+}
+
+/** Elips penuh (4 kubik) mulai dari sudut parametrik titik `start`, arah `dir` (±1). */
+function ellipseSegs(cx: number, cy: number, a: number, b: number, phi: number, sx: number, sy: number, dir: number): number[][] {
+  const cs = Math.cos(phi), sn = Math.sin(phi);
+  const lx = ((sx - cx) * cs + (sy - cy) * sn) / a, ly = (-(sx - cx) * sn + (sy - cy) * cs) / b;
+  const t0 = Math.atan2(ly, lx);
+  const P = (t: number) => [cx + a * Math.cos(t) * cs - b * Math.sin(t) * sn, cy + a * Math.cos(t) * sn + b * Math.sin(t) * cs];
+  const Dv = (t: number) => [-a * Math.sin(t) * cs - b * Math.cos(t) * sn, -a * Math.sin(t) * sn + b * Math.cos(t) * cs];
+  const step = (dir * Math.PI) / 2;
+  const h = (4 / 3) * Math.tan(step / 4);
+  const out: number[][] = [];
+  for (let i = 0; i < 4; i++) {
+    const ta = t0 + step * i, tb = ta + step;
+    const p0 = P(ta), p3 = P(tb), d0 = Dv(ta), d3 = Dv(tb);
+    out.push([p0[0], p0[1], p0[0] + h * d0[0], p0[1] + h * d0[1], p3[0] - h * d3[0], p3[1] - h * d3[1], p3[0], p3[1]]);
   }
   return out;
 }
 
-function collinear(ax: number, ay: number, bx: number, by: number, px: number, py: number, tol: number): boolean {
-  const len = Math.hypot(bx - ax, by - ay);
-  if (len < 1e-9) return true;
-  return Math.abs((bx - ax) * (ay - py) - (ax - px) * (by - ay)) / len <= tol * 0.5;
+/**
+ * Deret garis yang bertemu pada belokan kecil (3°–22°) adalah lengkung yang terpotong-potong (oval
+ * jadi bersegi) → diganti satu busur, atau kurva mulus bila bukan lingkaran. Garis yang nyaris
+ * segaris (< 3°) digabung menjadi satu garis.
+ */
+function mergeLineRuns(
+  all: { prim: Prim; pts: Float64Array; V0: [number, number]; V1: [number, number]; S: [number, number]; E: [number, number]; hs: boolean; he: boolean; iu: number; iv: number }[],
+  tol: number
+) {
+  const dirOf = (P: (typeof all)[number]): [number, number] => norm(P.E[0] - P.S[0], P.E[1] - P.S[1]);
+  const angle = (a: (typeof all)[number], b: (typeof all)[number]) => {
+    const u = dirOf(a), v = dirOf(b);
+    return Math.acos(Math.max(-1, Math.min(1, u[0] * v[0] + u[1] * v[1])));
+  };
+  const LO = (3 * Math.PI) / 180, HI = (22 * Math.PI) / 180;
+  const concat = (run: (typeof all)[number][]) => {
+    let n = 0;
+    for (const P of run) n += P.pts.length / 2 - 1;
+    const out = new Float64Array((n + 1) * 2);
+    let k = 0;
+    run.forEach((P, i) => {
+      const m = P.pts.length / 2;
+      for (let j = i === 0 ? 0 : 1; j < m; j++) {
+        out[k * 2] = P.pts[j * 2];
+        out[k * 2 + 1] = P.pts[j * 2 + 1];
+        k++;
+      }
+    });
+    return out;
+  };
+  for (let i = 0; i < all.length; i++) {
+    if (all[i].prim.t !== 'line') continue;
+    let j = i;
+    let kinked = false;
+    while (j + 1 < all.length && all[j + 1].prim.t === 'line') {
+      const a = angle(all[j], all[j + 1]);
+      if (a > HI) break;
+      if (a >= LO) kinked = true;
+      j++;
+    }
+    // seluruh loop tertutup → titik awal = titik akhir; sisakan satu potongan
+    if (j - i + 1 === all.length) j--;
+    if (j <= i) continue;
+    const run = all.slice(i, j + 1);
+    const pts = concat(run);
+    const first = run[0], last = run[run.length - 1];
+    let prim: Prim | null = null;
+    if (!kinked) prim = linePrim(pts, tol * 1.5);
+    else {
+      prim = arcPrim(pts, ARC_TOL * tol * 1.5, first.S[0], first.S[1], last.E[0], last.E[1]);
+      if (!prim) prim = { t: 'bez' };
+    }
+    if (!prim) continue;
+    all.splice(i, run.length, { prim, pts, V0: first.V0, V1: last.V1, S: first.S, E: last.E, hs: false, he: false, iu: first.iu, iv: last.iv });
+  }
 }
 
-function refit(run: Seg[], tol: number): Seg[] {
-  const SAMPLES = 5;
-  const pts: number[] = [run[0].p[0], run[0].p[1]];
-  for (const s of run) {
-    for (let k = 1; k <= SAMPLES; k++) {
-      const [x, y] = bez(s.p, k / SAMPLES);
-      pts.push(x, y);
+/**
+ * Kontur → primitif geometris. Setiap bentang (di antara ujung rantai / belokan sangat tajam) dipecah
+ * dengan pemrograman dinamis menjadi jumlah potongan minimum berupa garis lurus atau busur lingkaran
+ * (kurva bebas hanya bila tak ada yang muat). Sudut tidak ditentukan di depan: dua potongan yang arah
+ * singgungnya berbeda bertemu sebagai sudut tajam (perpotongan), yang searah disambung mulus (titik
+ * singgung; busur di antara dua garis = fillet). Rantai tertutup dicoba dulu sebagai lingkaran/elips.
+ */
+function fitPrimitives(q: Float64Array, m: number, vx: number[], vy: number[], vq: number[], cyc: boolean, fp: FitParams): Seg[] {
+  const N = vx.length - 1;
+  const tol = fp.primTol;
+  const period = m - 1; // rantai tertutup: q[m-1] = q[0]
+  const gather = (qa: number, qb: number): Float64Array => {
+    const out = new Float64Array((qb - qa + 1) * 2);
+    for (let i = qa; i <= qb; i++) {
+      const j = cyc ? i % period : i;
+      out[(i - qa) * 2] = q[j * 2];
+      out[(i - qa) * 2 + 1] = q[j * 2 + 1];
+    }
+    return out;
+  };
+  const soft = (ps: number[][]): Seg[] => ps.map((p) => ({ p, line: false, hardStart: false, hardEnd: false }));
+
+  // rantai tertutup yang muat lingkaran / elips → bentuk utuh (titik, cincin, lubang huruf)
+  if (cyc) {
+    const pts = gather(0, period - 1);
+    const n = pts.length / 2;
+    let area = 0;
+    for (let i = 0; i < n; i++) {
+      const j = (i + 1) % n;
+      area += pts[i * 2] * pts[j * 2 + 1] - pts[j * 2] * pts[i * 2 + 1];
+    }
+    const dir = area >= 0 ? 1 : -1;
+    const c = fitCircle(pts);
+    if (c && c[2] >= 1.5) {
+      // sumber bergerigi → toleransi seperti garis panjang, tapi relatif terhadap ukuran bentuk
+      const lim = Math.min(fp.straightTol, 0.08 * c[2] + 0.4);
+      let ok = true;
+      for (let i = 0; i < n && ok; i++) if (Math.abs(Math.hypot(pts[i * 2] - c[0], pts[i * 2 + 1] - c[1]) - c[2]) > lim) ok = false;
+      if (ok) return soft(ellipseSegs(c[0], c[1], c[2], c[2], 0, pts[0], pts[1], dir));
+    }
+    const el = fitEllipse(pts);
+    if (el && Math.min(el[2], el[3]) >= 1.5 && Math.max(el[2], el[3]) / Math.min(el[2], el[3]) < 15) {
+      const [cx, cy, a, b, phi] = el;
+      const lim = Math.min(fp.straightTol, 0.08 * Math.min(a, b) + 0.4);
+      const cs = Math.cos(phi), sn = Math.sin(phi);
+      let ok = true;
+      for (let i = 0; i < n && ok; i++) {
+        const lx = (pts[i * 2] - cx) * cs + (pts[i * 2 + 1] - cy) * sn;
+        const ly = -(pts[i * 2] - cx) * sn + (pts[i * 2 + 1] - cy) * cs;
+        const kk = Math.hypot(lx / a, ly / b) || 1;
+        if (Math.hypot(lx - lx / kk, ly - ly / kk) > lim) ok = false;
+      }
+      if (ok) return soft(ellipseSegs(cx, cy, a, b, phi, pts[0], pts[1], dir));
     }
   }
-  const q = new Float64Array(pts);
-  const n = pts.length / 2;
-  const f = run[0].p;
-  const l = run[run.length - 1].p;
-  const t1 = norm(f[2] - f[0], f[3] - f[1]);
-  const t2 = norm(l[4] - l[6], l[5] - l[7]);
-  const out: { p: number[]; first: number; last: number }[] = [];
-  fitCubic(q, 0, n - 1, t1, t2, tol, out);
-  return out.map((o, i) => ({
-    p: o.p,
-    line: false,
-    hardStart: i === 0 ? run[0].hardStart : false,
-    hardEnd: i === out.length - 1 ? run[run.length - 1].hardEnd : false,
-  }));
+
+  // simpul dengan indeks tak dibungkus (rantai tertutup: i ≥ N = putaran berikutnya)
+  const VX = (i: number) => (cyc ? vx[i % N] : vx[i]);
+  const VY = (i: number) => (cyc ? vy[i % N] : vy[i]);
+  const VQ = (i: number) => (cyc ? vq[i % N] + Math.floor(i / N) * period : vq[i]);
+  const QX = (i: number) => q[(cyc ? VQ(i) % period : VQ(i)) * 2];
+  const QY = (i: number) => q[(cyc ? VQ(i) % period : VQ(i)) * 2 + 1];
+
+  // Pemutus paksa: ujung rantai terbuka + belokan poligon ≥ 120°.
+  const breaks: number[] = [];
+  for (let i = cyc ? 0 : 1; i < N; i++) {
+    const ip = (i - 1 + N) % N;
+    const inx = cyc ? (i + 1) % N : i + 1;
+    const ax = vx[i] - vx[ip], ay = vy[i] - vy[ip], bx = vx[inx] - vx[i], by = vy[inx] - vy[i];
+    const turn = Math.acos(Math.max(-1, Math.min(1, (ax * bx + ay * by) / (Math.hypot(ax, ay) * Math.hypot(bx, by) || 1))));
+    if (turn >= (120 * Math.PI) / 180) breaks.push(i);
+  }
+  // simpul tajam (≥ 55°): kurva bebas tidak boleh melintasinya (sudut gerigi tetap tajam)
+  const sharp: boolean[] = new Array(N + 1).fill(false);
+  for (let i = cyc ? 0 : 1; i < N; i++) {
+    const ip = (i - 1 + N) % N;
+    const inx = cyc ? (i + 1) % N : i + 1;
+    const ax = vx[i] - vx[ip], ay = vy[i] - vy[ip], bx = vx[inx] - vx[i], by = vy[inx] - vy[i];
+    const turn = Math.acos(Math.max(-1, Math.min(1, (ax * bx + ay * by) / (Math.hypot(ax, ay) * Math.hypot(bx, by) || 1))));
+    sharp[i] = turn >= (55 * Math.PI) / 180;
+  }
+  const isSharp = (i: number) => sharp[cyc ? i % N : i];
+  const spans: number[][] = [];
+  if (!cyc) {
+    const bs = [0, ...breaks, N];
+    for (let k = 0; k + 1 < bs.length; k++) {
+      const sp: number[] = [];
+      for (let i = bs[k]; i <= bs[k + 1]; i++) sp.push(i);
+      spans.push(sp);
+    }
+  } else if (breaks.length === 0) {
+    const sp: number[] = [];
+    for (let i = 0; i <= N; i++) sp.push(i);
+    spans.push(sp);
+  } else {
+    for (let k = 0; k < breaks.length; k++) {
+      const a = breaks[k];
+      const b = k + 1 < breaks.length ? breaks[k + 1] : breaks[0] + N;
+      const sp: number[] = [];
+      for (let i = a; i <= b; i++) sp.push(i);
+      spans.push(sp);
+    }
+  }
+
+  interface Piece {
+    prim: Prim;
+    pts: Float64Array;
+    V0: [number, number]; // simpul poligon di ujung (posisi sudut bila jadi sudut)
+    V1: [number, number];
+    S: [number, number];
+    E: [number, number];
+    hs: boolean;
+    he: boolean;
+    tS?: [number, number]; // arah singgung bersama di sambungan mulus (untuk kurva bebas)
+    tE?: [number, number];
+    iu: number; // indeks simpul (tak dibungkus) di awal/akhir potongan
+    iv: number;
+  }
+  const all: Piece[] = [];
+  for (const sp of spans) {
+    const K = sp.length;
+    const cost = new Float64Array(K).fill(Infinity);
+    const from = new Int32Array(K).fill(-1);
+    const prim: (Prim | null)[] = new Array(K).fill(null);
+    cost[0] = 0;
+    for (let v = 1; v < K; v++) {
+      for (let u = Math.max(0, v - 40); u < v; u++) {
+        if (!Number.isFinite(cost[u])) continue;
+        const qa = VQ(sp[u]), qb = VQ(sp[v]);
+        if (qb <= qa || (cyc && qb - qa >= period)) continue; // satu potongan tak boleh memutari seluruh loop
+        const pts = gather(qa, qb);
+        // garis panjang boleh memakai toleransi pelurusan (riak JPEG), garis pendek tidak
+        const chord = Math.hypot(QX(sp[v]) - QX(sp[u]), QY(sp[v]) - QY(sp[u]));
+        let pr: Prim | null = linePrim(pts, chord >= fp.straightLen ? Math.max(tol, fp.straightTol * 0.8) : tol);
+        // garis sangat pendek biasanya potongan lengkung → lebih mahal daripada kurva
+        let c = chord >= fp.straightLen / 2 ? 1 : 2.2;
+        if (!pr) {
+          // busur: toleransi lebih ketat (lengkung asli hasil upscale halus); galat besar = mahal
+          const tolA = chord >= fp.straightLen ? Math.max(ARC_TOL * tol, 0.55 * fp.straightTol) : ARC_TOL * tol;
+          pr = arcPrim(pts, tolA, QX(sp[u]), QY(sp[u]), QX(sp[v]), QY(sp[v]));
+          if (pr && pr.t === 'arc') c = 1.05 + pr.res / tolA;
+        }
+        if (!pr && v - u <= 8) {
+          let crossesSharp = false;
+          for (let k = u + 1; k < v && !crossesSharp; k++) if (isSharp(sp[k])) crossesSharp = true;
+          if (!crossesSharp) {
+            pr = { t: 'bez' };
+            c = 1 + 1.2 * (v - u); // per sisi poligon lebih mahal dari garis panjang
+          }
+        }
+        if (pr && cost[u] + c < cost[v]) {
+          cost[v] = cost[u] + c;
+          from[v] = u;
+          prim[v] = pr;
+        }
+      }
+    }
+    const pieces: Piece[] = [];
+    for (let v = K - 1; v > 0; v = from[v]) {
+      const u = from[v];
+      if (u < 0) break;
+      pieces.push({
+        prim: prim[v]!,
+        pts: gather(VQ(sp[u]), VQ(sp[v])),
+        V0: [VX(sp[u]), VY(sp[u])],
+        V1: [VX(sp[v]), VY(sp[v])],
+        S: [QX(sp[u]), QY(sp[u])],
+        E: [QX(sp[v]), QY(sp[v])],
+        hs: false,
+        he: false,
+        iu: sp[u],
+        iv: sp[v],
+      });
+    }
+    pieces.reverse();
+    all.push(...pieces);
+  }
+  if (all.length === 0) return [];
+  mergeLineRuns(all, tol);
+
+  type LineP = Extract<Prim, { t: 'line' }>;
+  type ArcP = Extract<Prim, { t: 'arc' }>;
+  const projLine = (pr: LineP, x: number, y: number): [number, number] => {
+    const t = (x - pr.px) * pr.dx + (y - pr.py) * pr.dy;
+    return [pr.px + t * pr.dx, pr.py + t * pr.dy];
+  };
+  const onCircle = (pr: ArcP, x: number, y: number): [number, number] => {
+    const [ux, uy] = norm(x - pr.cx, y - pr.cy);
+    return [pr.cx + pr.r * ux, pr.cy + pr.r * uy];
+  };
+  const lineX = (A: LineP, B: LineP): [number, number] | null => {
+    const den = A.dx * B.dy - A.dy * B.dx;
+    if (Math.abs(den) < 0.02) return null;
+    const t = ((B.px - A.px) * B.dy - (B.py - A.py) * B.dx) / den;
+    return [A.px + t * A.dx, A.py + t * A.dy];
+  };
+  const lineCircleX = (L: LineP, C: ArcP, V: [number, number]): [number, number] | null => {
+    const fx = L.px - C.cx, fy = L.py - C.cy;
+    const b = fx * L.dx + fy * L.dy;
+    const disc = b * b - (fx * fx + fy * fy - C.r * C.r);
+    if (disc < 0) return null;
+    const sq = Math.sqrt(disc);
+    const P1: [number, number] = [L.px + (-b + sq) * L.dx, L.py + (-b + sq) * L.dy];
+    const P2: [number, number] = [L.px + (-b - sq) * L.dx, L.py + (-b - sq) * L.dy];
+    return Math.hypot(P1[0] - V[0], P1[1] - V[1]) < Math.hypot(P2[0] - V[0], P2[1] - V[1]) ? P1 : P2;
+  };
+  const near = (P: [number, number] | null, V: [number, number], lim: number) =>
+    P && Math.hypot(P[0] - V[0], P[1] - V[1]) <= lim ? P : null;
+  // arah singgung potongan di ujung akhir (end) / awal (start), searah tempuh
+  const tangent = (P: Piece, atEnd: boolean): [number, number] => {
+    const pr = P.prim;
+    if (pr.t === 'line') {
+      const sx = P.E[0] - P.S[0], sy = P.E[1] - P.S[1];
+      const sgn = sx * pr.dx + sy * pr.dy >= 0 ? 1 : -1;
+      return [pr.dx * sgn, pr.dy * sgn];
+    }
+    if (pr.t === 'arc') {
+      const X = atEnd ? P.E : P.S;
+      const [rx, ry] = norm(X[0] - pr.cx, X[1] - pr.cy);
+      return pr.sweep >= 0 ? [-ry, rx] : [ry, -rx];
+    }
+    const n = P.pts.length / 2;
+    const j = Math.min(n - 1, 3);
+    return atEnd
+      ? norm(P.pts[(n - 1) * 2] - P.pts[(n - 1 - j) * 2], P.pts[(n - 1) * 2 + 1] - P.pts[(n - 1 - j) * 2 + 1])
+      : norm(P.pts[j * 2] - P.pts[0], P.pts[j * 2 + 1] - P.pts[1]);
+  };
+
+  // fillet: busur di antara dua garis → pusat berjarak r dari kedua garis (singgung persis)
+  const fillet = (L1: LineP, A: ArcP, L2: LineP) => {
+    const n1 = [-L1.dy, L1.dx], n2 = [-L2.dy, L2.dx];
+    const d1 = n1[0] * L1.px + n1[1] * L1.py, d2 = n2[0] * L2.px + n2[1] * L2.py;
+    const s1 = Math.sign(n1[0] * A.cx + n1[1] * A.cy - d1) || 1;
+    const s2 = Math.sign(n2[0] * A.cx + n2[1] * A.cy - d2) || 1;
+    const det = n1[0] * n2[1] - n1[1] * n2[0];
+    if (Math.abs(det) < 0.05) return;
+    const e1 = d1 + s1 * A.r, e2 = d2 + s2 * A.r;
+    const cx = (e1 * n2[1] - n1[1] * e2) / det, cy = (n1[0] * e2 - e1 * n2[0]) / det;
+    if (Math.hypot(cx - A.cx, cy - A.cy) <= 2 * tol + 0.3 * A.r) {
+      A.cx = cx;
+      A.cy = cy;
+    }
+  };
+
+  const SMOOTH = Math.cos((22 * Math.PI) / 180);
+  const KINK = Math.cos((4 * Math.PI) / 180);
+  const joint = (P: Piece, Q: Piece) => {
+    const a = P.prim, b = Q.prim;
+    const t1 = tangent(P, true), t2 = tangent(Q, false);
+    const smooth = t1[0] * t2[0] + t1[1] * t2[1] >= SMOOTH;
+    const V = P.V1; // simpul poligon (perpotongan sisi) — posisi sudut
+    const D = P.E; // titik data
+    let J: [number, number] | null = null;
+    if (smooth) {
+      if (a.t === 'line' && b.t === 'line') J = near(lineX(a, b), D, 3 * tol) ?? projLine(a, D[0], D[1]);
+      else if (a.t === 'line' && b.t === 'arc') J = near(projLine(a, b.cx, b.cy), D, 4 * tol) ?? projLine(a, D[0], D[1]);
+      else if (a.t === 'arc' && b.t === 'line') J = near(projLine(b, a.cx, a.cy), D, 4 * tol) ?? projLine(b, D[0], D[1]);
+      else if (a.t === 'arc' && b.t === 'arc') {
+        const A = onCircle(a, D[0], D[1]), B = onCircle(b, D[0], D[1]);
+        J = [(A[0] + B[0]) / 2, (A[1] + B[1]) / 2];
+      } else if (a.t === 'line') J = projLine(a, D[0], D[1]);
+      else if (b.t === 'line') J = projLine(b, D[0], D[1]);
+      else J = D;
+      P.E = J;
+      Q.S = J;
+      // Masih patah (> 4°)? Busur di sambungan itu jadi kurva bebas dengan singgung bersama.
+      const u1 = tangent(P, true), u2 = tangent(Q, false);
+      if (u1[0] * u2[0] + u1[1] * u2[1] < KINK) {
+        if (a.t === 'arc') P.prim = { t: 'bez' };
+        if (b.t === 'arc') Q.prim = { t: 'bez' };
+      }
+      // arah singgung bersama → kurva bebas di kedua sisi tersambung tanpa patahan
+      const T: [number, number] = a.t === 'line' ? u1 : b.t === 'line' ? u2 : norm(u1[0] + u2[0], u1[1] + u2[1]);
+      P.tE = T;
+      Q.tS = T;
+    } else {
+      const lim = tol + 1;
+      if (a.t === 'line' && b.t === 'line') J = near(lineX(a, b), V, lim);
+      else if (a.t === 'line' && b.t === 'arc') J = near(lineCircleX(a, b, V), V, lim);
+      else if (a.t === 'arc' && b.t === 'line') J = near(lineCircleX(b, a, V), V, lim);
+      if (!J) J = a.t === 'line' ? projLine(a, V[0], V[1]) : b.t === 'line' ? projLine(b, V[0], V[1]) : V;
+      P.he = true;
+      Q.hs = true;
+    }
+    P.E = J;
+    Q.S = J;
+  };
+
+  // fillet dulu (mengubah pusat busur), lalu sambungan
+  const nP = all.length;
+  for (let i = 0; i < nP; i++) {
+    const pr = all[i].prim;
+    if (pr.t !== 'arc') continue;
+    const prev = i > 0 ? all[i - 1] : cyc ? all[nP - 1] : null;
+    const next = i + 1 < nP ? all[i + 1] : cyc ? all[0] : null;
+    if (prev && next && prev !== all[i] && next !== all[i] && prev.prim.t === 'line' && next.prim.t === 'line') {
+      // fillet sah hanya bila sapuan busur = belokan antara kedua garis (±25°)
+      const a = tangent(prev, true), b = tangent(next, false);
+      const turn = Math.acos(Math.max(-1, Math.min(1, a[0] * b[0] + a[1] * b[1])));
+      if (Math.abs(Math.abs(pr.sweep) - turn) <= (25 * Math.PI) / 180) fillet(prev.prim, pr, next.prim);
+    }
+  }
+  for (let i = 0; i < nP; i++) {
+    const last = i === nP - 1;
+    if (last && !cyc) break;
+    if (last && nP === 1) break;
+    joint(all[i], all[(i + 1) % nP]);
+  }
+  if (!cyc) {
+    all[0].hs = true;
+    all[nP - 1].he = true;
+  } else if (nP === 1) {
+    all[0].hs = all[0].he = true;
+  }
+
+  const segs: Seg[] = [];
+  for (const P of all) {
+    const pr = P.prim;
+    let ps: number[][];
+    if (pr.t === 'line') {
+      segs.push({ p: [P.S[0], P.S[1], 0, 0, 0, 0, P.E[0], P.E[1]], line: true, hardStart: P.hs, hardEnd: P.he });
+      continue;
+    } else if (pr.t === 'arc') {
+      ps = arcSegs(pr.cx, pr.cy, pr.r, pr.sweep, P.S, P.E);
+    } else {
+      // Kurva bebas: lengkung mulus ala potrace lewat titik tengah sisi poligon (meredam riak
+      // tepi), disampel, lalu di-fit ulang dengan singgung ujung yang sudah disepakati.
+      const samp: number[] = [P.S[0], P.S[1]];
+      const add = (b: number[]) => {
+        for (let k = 1; k <= 6; k++) {
+          const [x, y] = bez(b, k / 6);
+          samp.push(x, y);
+        }
+      };
+      const mid = (i: number): [number, number] => [(VX(i) + VX(i + 1)) / 2, (VY(i) + VY(i + 1)) / 2];
+      let cx = P.S[0], cy = P.S[1];
+      const lineTo = (x: number, y: number) => {
+        add([cx, cy, cx, cy, x, y, x, y]);
+        cx = x;
+        cy = y;
+      };
+      if (P.iv - P.iu >= 2) {
+        const m0 = mid(P.iu);
+        lineTo(m0[0], m0[1]);
+        for (let i = P.iu + 1; i < P.iv; i++) {
+          const [m1x, m1y] = mid(i);
+          const vx1 = VX(i), vy1 = VY(i);
+          const p0x = VX(i - 1), p0y = VY(i - 1), p2x = VX(i + 1), p2y = VY(i + 1);
+          const l1 = Math.abs(p2x - p0x) + Math.abs(p2y - p0y);
+          const dd = l1 < 1e-9 ? 0 : Math.abs((vx1 - p0x) * (p2y - p0y) - (vy1 - p0y) * (p2x - p0x)) / l1;
+          const al = Math.max(0.55, Math.min(1, dd > 1 ? (1 - 1 / dd) / 0.75 : 0));
+          add([cx, cy, cx + al * (vx1 - cx), cy + al * (vy1 - cy), m1x + al * (vx1 - m1x), m1y + al * (vy1 - m1y), m1x, m1y]);
+          cx = m1x;
+          cy = m1y;
+        }
+      }
+      lineTo(P.E[0], P.E[1]);
+      const pts = new Float64Array(samp);
+      const n = pts.length / 2;
+      const j1 = Math.min(n - 1, 3), j2 = Math.max(0, n - 4);
+      const out: { p: number[]; first: number; last: number }[] = [];
+      const t1 = P.tS ?? norm(pts[j1 * 2] - pts[0], pts[j1 * 2 + 1] - pts[1]);
+      const t2: [number, number] = P.tE ? [-P.tE[0], -P.tE[1]] : norm(pts[j2 * 2] - pts[(n - 1) * 2], pts[j2 * 2 + 1] - pts[(n - 1) * 2 + 1]);
+      fitCubic(pts, 0, n - 1, t1, t2, tol, out);
+      ps = out.map((o) => o.p);
+    }
+    ps.forEach((p, j) => segs.push({ p, line: false, hardStart: P.hs && j === 0, hardEnd: P.he && j === ps.length - 1 }));
+  }
+  return segs;
 }
 
 // ───────────────────────────── 4. Path ─────────────────────────────
@@ -1239,7 +1856,7 @@ function fitParams(o: ContourOptions): FitParams {
   return {
     spline: (o.mode ?? 'spline') === 'spline',
     polyTol: o.tolerance ?? 0.4 + 0.05 * scale,
-    mergeTol: 0.3 + 0.15 * scale,
+    primTol: 0.2 * scale + 0.35,
     alphaMax: o.alphaMax ?? 0.9,
     smoothIters: Math.max(1, Math.round(scale)),
     arm: Math.max(2, Math.round(scale)),

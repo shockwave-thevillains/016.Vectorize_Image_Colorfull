@@ -17,8 +17,9 @@ Mode background **Magenta #FF00FF** dari 014 tetap tersedia sebagai opsi.
 komputer pengguna. Karena itu aplikasi ini bisa di-hosting gratis sebagai situs statis di **GitHub Pages**.
 
 - Mesin vektor bawaan: **Kontur Bersama** (`src/lib/contourTracer.ts`, ditulis sendiri) — setiap batas
-  antara dua warna di-fit SATU kali (poligon optimal ala Potrace → sudut/kurva → Bézier), jadi kedua sisi
-  memakai kurva yang sama: tepi mulus, tanpa celah, file ±40–60% lebih kecil. Pilihan lain:
+  antara dua warna di-fit SATU kali menjadi primitif geometris — garis lurus (dikunci mendatar/tegak),
+  busur & fillet, lingkaran/elips utuh; kurva bebas hanya bila tak ada yang muat — jadi kedua sisi memakai
+  kurva yang sama: tepi rapi seperti gambar vektor buatan tangan, tanpa celah, file ±50–65% lebih kecil. Pilihan lain:
   [`@visioncortex/vtracer`](https://github.com/visioncortex/vtracer) (Rust → WebAssembly). Keduanya
   dijalankan di **Web Worker** supaya UI tetap responsif.
 - Frontend: React + Vite + Tailwind.
