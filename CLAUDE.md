@@ -82,6 +82,19 @@ npm run build   # wajib lolos sebelum commit
   Default kurva: spline (huruf/angka bulat halus); preset logo/flat tetap polygon.
   `scaleSvg`: koordinat dibulatkan 1 desimal bila hasil ≥ 2000 px (ukuran file −10%, tak terlihat).
   Resolusi kerja maks 3200 px; filter bintik diskalakan dengan faktor upscale (`scaledSpeckle`).
+- `src/lib/objectGradients.ts` — `unifyObjects` (setelah semua langkah snapping, sebelum tracing; butuh
+  salinan gambar SEBELUM dilubangi gradien = `prePunch`): objek = komponen 4-terhubung dengan langkah warna
+  ≤ 12 pada gambar asli ter-blur 3×3 (tepi kuat memisahkan, gradasi lembut tidak). Objek "berbercak" (≥ 2
+  potongan yang masing-masing ≥ 8% luas: warna datar berbeda / area gradien) dicocokkan dengan SATU
+  gradien linear multi-stop (arah = gradien kecerahan, 16 bin, RDP tol 4) atas piksel DALAM (pita tepi
+  ±skala px tidak dihitung); diterima bila RMSE ≤ 1,5×toleransi, p95 ≤ 3×, dan profil halus (lompatan antar
+  bin ≤ max(16, 0,45×rentang) — lampu oranye-putih/pita halo bukan gradien). Rentang < 14 → satu warna
+  palet. Objek bertetangga (pita ≤ 2·skala+2) digabung bila satu gradien menjelaskan gabungannya. Objek
+  yang area gradiennya < 90% di dalam objek (pad chip berbagi gradien) dilewati. Pita anti-aliasing tepi
+  ikut objek bila warnanya lebih dekat ke prediksi objek daripada ke warna luar. fillMask hanya
+  dilebarkan ke piksel datar (bukan ke gradien lain → tanpa takik gelap di lubang huruf); piksel yang
+  dikembalikan ke lapisan datar diberi warna PREDIKSI gradiennya. Hasil: huruf emas "15%" satu gradien
+  per huruf, bukan tambalan; desain datar (truk) tidak berubah.
 - `src/lib/contourTracer.ts` — tracer bawaan ("Kontur Bersama", `config.tracer` 'contour' | 'vtracer'),
   dijalankan di `vtracer.worker.ts` (`options.engine === 'contour'`); juga dipakai untuk masker gradien.
   Urutan: `cleanIsolated` (piksel tanpa tetangga-4 sewarna → warna tetangga; garis diagonal 1 px di latar

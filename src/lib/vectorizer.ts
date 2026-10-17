@@ -37,6 +37,7 @@ import {
   GradientRegion,
 } from './gradientDetect';
 import { injectGradients, gradientStopColors } from './gradientSvg';
+import { unifyObjects } from './objectGradients';
 import svgpath from 'svgpath';
 
 function getImageTracer() {
@@ -639,10 +640,12 @@ export function loadImageToCanvas(
       // 2. Gradasi → gradient vektor asli. Area yang cocok dilubangi dari lapisan datar.
       let gradientRegions: GradientRegion[] = [];
       let gradientFallbackCount = 0;
+      let prePunch: Uint8ClampedArray | null = null;
       if (withGradients && config.detectGradients !== false) {
         const det = detectGradientRegions(workingImageData, { maxRmse: config.gradientTolerance ?? 8 });
         gradientRegions = det.regions;
         gradientFallbackCount = det.fallbackCount;
+        prePunch = new Uint8ClampedArray(workingImageData.data);
         punchGradientRegions(workingImageData, gradientRegions);
       }
 
@@ -670,6 +673,16 @@ export function loadImageToCanvas(
         if (config.smoothEdges !== false) majorityFilter(workingImageData, 2);
         widenThinStrokes(workingImageData, preSnap, effectiveScale);
         regularizeBarcodes(workingImageData, preSnap, effectiveScale);
+        // Objek bergradasi yang terpecah jadi potongan gradien + bercak datar → satu isian.
+        if (prePunch) {
+          gradientRegions = unifyObjects(
+            workingImageData,
+            prePunch,
+            gradientRegions,
+            dominantPalette.map((c) => [c.r, c.g, c.b] as [number, number, number]),
+            { scale: effectiveScale, maxRmse: config.gradientTolerance ?? 9 }
+          );
+        }
         rawColorCount = dominantPalette.rawColorCount;
         mergedColorCount = dominantPalette.mergedColorCount;
         snappedPalette = dominantPalette.map((c) => c.hex);
