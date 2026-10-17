@@ -1063,6 +1063,34 @@ export const SettingsBar: React.FC<SettingsBarProps> = ({
 
           <div className="space-y-1.5">
             <div className="flex justify-between font-semibold text-slate-700">
+              <span>Mesin Tracing</span>
+              <span className="font-bold text-indigo-600">
+                {(config.tracer ?? 'contour') === 'contour' ? 'Kontur Bersama' : 'vtracer'}
+              </span>
+            </div>
+            <div className="grid grid-cols-2 gap-1 pt-1">
+              {(['contour', 'vtracer'] as const).map((t) => (
+                <button
+                  key={t}
+                  type="button"
+                  onClick={() => onChange({ ...config, tracer: t })}
+                  className={`py-1.5 px-2 text-[11px] font-semibold rounded-lg border transition cursor-pointer ${
+                    (config.tracer ?? 'contour') === t
+                      ? 'bg-indigo-50 border-indigo-600 text-indigo-700 font-bold'
+                      : 'bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100'
+                  }`}
+                >
+                  {t === 'contour' ? 'Kontur Bersama' : 'vtracer'}
+                </button>
+              ))}
+            </div>
+            <p className="text-[10px] text-slate-400">
+              "Kontur Bersama": satu kurva per batas warna — tepi mulus, tanpa celah, file lebih kecil.
+            </p>
+          </div>
+
+          <div className="space-y-1.5">
+            <div className="flex justify-between font-semibold text-slate-700">
               <span>Ketajaman Sudut (Corner)</span>
               <span className="font-bold text-indigo-600">{config.cornerThreshold ?? 28}°</span>
             </div>

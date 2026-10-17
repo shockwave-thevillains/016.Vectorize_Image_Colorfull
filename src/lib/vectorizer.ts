@@ -307,6 +307,7 @@ export const DEFAULT_CONFIG: VectorizeConfig = {
   colorPrecision: 8,
   colorSnapping: true,
   snappedColorCount: 24,
+  tracer: 'contour',
   curveStyle: 'spline',
   mode: 'spline',
   hierarchical: 'stacked',
@@ -970,20 +971,28 @@ async function vectorizeWithVtracer(
         ? config.lockedPalette
         : snappedPalette || [];
   // Peta warna raster harus dibuat sebelum buffer dipindahkan ke worker.
-  const paletteIndex = fillPalette.length > 0 ? buildPaletteIndexMap(imageData, fillPalette) : undefined;
-  const flatJob = vectorizeRgbaInWorker(imageData.data, width, height, vtracerOptions);
-  const gradientJobs = gradientRegions.map((r) => traceGradientRegion(r, { ...config, filterSpeckle: speckle }));
+  const paletteIndex =
+    fillPalette.length > 0 && (config.tracer ?? 'contour') !== 'contour'
+      ? buildPaletteIndexMap(imageData, fillPalette)
+      : undefined;
+  const useContour = (config.tracer ?? 'contour') === 'contour';
+  const flatJob = vectorizeRgbaInWorker(
+    imageData.data,
+    width,
+    height,
+    useContour ? contourTracerOptions(config, speckle, effectiveScale) : vtracerOptions
+  );
+  const gradientJobs = gradientRegions.map((r) =>
+    traceGradientRegion(r, { ...config, filterSpeckle: speckle }, effectiveScale)
+  );
   const [{ svg: rawSvg }, gradientDs] = await Promise.all([flatJob, Promise.all(gradientJobs)]);
   onProgress?.(80);
 
-  let finalSvg = recolorSvgByVisibility(
-    bakeTransformsWithSvgPath(postProcessVtracerSvg(rawSvg, width || 600, height || 600, config)),
-    fillPalette,
-    paletteIndex,
-    width,
-    height,
-    pathBBox
-  );
+  const tracedSvg = bakeTransformsWithSvgPath(postProcessVtracerSvg(rawSvg, width || 600, height || 600, config));
+  // Tracer kontur memakai warna piksel persis (satu path per warna) → tidak perlu dicocokkan ulang.
+  let finalSvg = useContour
+    ? tracedSvg
+    : recolorSvgByVisibility(tracedSvg, fillPalette, paletteIndex, width, height, pathBBox);
 
   const gradientItems = gradientRegions
     .map((r, i) => ({ spec: r.spec, d: gradientDs[i] }))
@@ -1050,8 +1059,10 @@ async function vectorizeWithVtracer(
     svgSize: svgBytes,
     epsSize: epsBytes,
     processingTimeMs: Math.round(performance.now() - startTime),
-    engineUsed: '@visioncortex/vtracer (Rust/WASM, browser worker)',
-    engineVersion: 'v1.0.0-alpha.4',
+    engineUsed: useContour
+      ? 'Kontur bersama (browser worker)'
+      : '@visioncortex/vtracer (Rust/WASM, browser worker)',
+    engineVersion: useContour ? 'v1' : 'v1.0.0-alpha.4',
     activeMode: config.curveStyle || config.mode || 'polygon',
     rawColorCount,
     mergedColorCount,
@@ -1067,27 +1078,47 @@ async function vectorizeWithVtracer(
   };
 }
 
+/** Opsi tracer kontur bersama (lihat `contourTracer.ts`). */
+function contourTracerOptions(config: VectorizeConfig, speckle: number, effectiveScale: number): Record<string, unknown> {
+  const isPolygon = (config.curveStyle || config.mode || 'polygon') === 'polygon';
+  return {
+    engine: 'contour',
+    mode: isPolygon ? 'polygon' : 'spline',
+    filterSpeckle: speckle,
+    scale: Math.max(1, effectiveScale),
+  };
+}
+
 export function scaledSpeckle(config: VectorizeConfig, effectiveScale: number): number {
   const base = config.filterSpeckle ?? 12;
   return Math.max(2, Math.round(base * Math.min(1, effectiveScale / 4)));
 }
 
 /**
- * Trace masker satu area gradien (vtracer mode hitam-putih) → atribut `d` dalam koordinat kerja.
+ * Trace masker satu area gradien (vtracer mode hitam-putih / tracer kontur) → atribut `d` dalam koordinat kerja.
  * String kosong bila tracing gagal (area tetap tampil dengan warna rata-rata lapisan datar).
  */
-async function traceGradientRegion(r: GradientRegion, config: VectorizeConfig): Promise<string> {
+async function traceGradientRegion(r: GradientRegion, config: VectorizeConfig, effectiveScale: number): Promise<string> {
   try {
     const { rgba, width, height, pad } = regionMaskToRgba(r);
     const isPolygon = (config.curveStyle || config.mode || 'polygon') === 'polygon';
-    const { svg } = await vectorizeRgbaInWorker(rgba, width, height, {
-      clustering: 'bw',
-      mode: isPolygon ? 'polygon' : 'spline',
-      filterSpeckle: Math.min(config.filterSpeckle ?? 8, 8),
-      cornerThreshold: config.cornerThreshold ?? (isPolygon ? 28 : 55),
-      lengthThreshold: config.lengthThreshold ?? (isPolygon ? 10 : 4),
-      pathPrecision: 2,
-    });
+    const speckle = Math.min(config.filterSpeckle ?? 8, 8);
+    let options: Record<string, unknown>;
+    if ((config.tracer ?? 'contour') === 'contour') {
+      // Latar putih masker → transparan; isi hitam = satu area.
+      for (let i = 0; i < rgba.length; i += 4) if (rgba[i] > 127) rgba[i + 3] = 0;
+      options = contourTracerOptions(config, speckle, effectiveScale);
+    } else {
+      options = {
+        clustering: 'bw',
+        mode: isPolygon ? 'polygon' : 'spline',
+        filterSpeckle: speckle,
+        cornerThreshold: config.cornerThreshold ?? (isPolygon ? 28 : 55),
+        lengthThreshold: config.lengthThreshold ?? (isPolygon ? 10 : 4),
+        pathPrecision: 2,
+      };
+    }
+    const { svg } = await vectorizeRgbaInWorker(rgba, width, height, options);
     const baked = bakeTransformsWithSvgPath(svg);
     const ds: string[] = [];
     const re = /<path\b[^>]*\bd=["']([^"']+)["']/gi;

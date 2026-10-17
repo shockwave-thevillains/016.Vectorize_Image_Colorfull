@@ -16,7 +16,10 @@ Mode background **Magenta #FF00FF** dari 014 tetap tersedia sebagai opsi.
 **Berjalan 100% di browser.** Tidak ada server, tidak ada upload: gambar tidak pernah meninggalkan
 komputer pengguna. Karena itu aplikasi ini bisa di-hosting gratis sebagai situs statis di **GitHub Pages**.
 
-- Mesin vektor: [`@visioncortex/vtracer`](https://github.com/visioncortex/vtracer) (Rust → WebAssembly),
+- Mesin vektor bawaan: **Kontur Bersama** (`src/lib/contourTracer.ts`, ditulis sendiri) — setiap batas
+  antara dua warna di-fit SATU kali (poligon optimal ala Potrace → sudut/kurva → Bézier), jadi kedua sisi
+  memakai kurva yang sama: tepi mulus, tanpa celah, file ±40–60% lebih kecil. Pilihan lain:
+  [`@visioncortex/vtracer`](https://github.com/visioncortex/vtracer) (Rust → WebAssembly). Keduanya
   dijalankan di **Web Worker** supaya UI tetap responsif.
 - Frontend: React + Vite + Tailwind.
 - Tidak memanggil API eksternal apa pun (tidak ada Gemini, analytics, atau CDN).
@@ -150,7 +153,7 @@ npm run vendor:vtracer
 
 - **Upscale** (`1x / 2x / 4x` di UI): default 4x memperbesar gambar 1024 px ke 2400 px sebelum tracing —
   tepi lebih halus, tapi ~4–6× lebih berat. Uji A/B di zoom 200% sebelum memilih.
-- **Badge merah "Fallback ImageTracer"** = gambar itu tidak diproses vtracer. Proses ulang sebelum submit.
+- **Badge merah "Fallback ImageTracer"** = gambar itu tidak diproses tracer utama (Kontur Bersama/vtracer). Proses ulang sebelum submit.
 - Biarkan tab browser tetap di depan selama batch berjalan (Chrome memperlambat tab latar belakang).
 - Semua pemrosesan memakai CPU & RAM komputer pengguna. Batch besar (100+ gambar) di laptop lama bisa
   terasa berat; proses bertahap bila perlu.

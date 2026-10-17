@@ -73,7 +73,7 @@ npm run build   # wajib lolos sebelum commit
   batang = satu warna (Lab terdekat ke ¼ teratas kecerahan batang, rona ×2), celah = warna/transparan
   terbanyak, batang min 3 px. Huruf miring ("W") tidak lolos uji korelasi.
   Gradasi: `minAreaFraction` 0.0002, `maxRegions` 160 (garis miring "%" dsb. ikut terdeteksi).
-  Palet TETAP diserahkan ke vtracer (tanpa palet vtracer menggabungkan klaster mirip: bingkai kaca teal
+  (vtracer:) Palet TETAP diserahkan ke vtracer (tanpa palet vtracer menggabungkan klaster mirip: bingkai kaca teal
   truk tertelan kabin abu). Warna rata-rata klaster yang dipetakan vtracer bisa salah (huruf perak →
   emas), jadi `recolorSvgByVisibility` memecah tiap path menjadi bentuk terpisah (kontur luar + lubang;
   vtracer menggabungkan area sewarna yang berjauhan dalam satu path), merasterisasi dari atas ke bawah,
@@ -82,6 +82,22 @@ npm run build   # wajib lolos sebelum commit
   Default kurva: spline (huruf/angka bulat halus); preset logo/flat tetap polygon.
   `scaleSvg`: koordinat dibulatkan 1 desimal bila hasil ≥ 2000 px (ukuran file −10%, tak terlihat).
   Resolusi kerja maks 3200 px; filter bintik diskalakan dengan faktor upscale (`scaledSpeckle`).
+- `src/lib/contourTracer.ts` — tracer bawaan ("Kontur Bersama", `config.tracer` 'contour' | 'vtracer'),
+  dijalankan di `vtracer.worker.ts` (`options.engine === 'contour'`); juga dipakai untuk masker gradien.
+  Urutan: `cleanIsolated` (piksel tanpa tetangga-4 sewarna → warna tetangga; garis diagonal 1 px di latar
+  seragam tetap) → area 8-terhubung, bintik (< speckle²) dilebur ke tetangga WARNA terdekat (lubang
+  transparan hanya bila < speckle²/8; goresan memanjang berdiri sendiri — huruf "I" kecil — tetap), area
+  sewarna yang bersentuhan disatukan → `dissolveRims`: pita tipis (2·luas/keliling ≤ 1,6×skala) di antara
+  dua area opak yang warnanya campuran keduanya / overshoot dekat salah satunya dibagi ke keduanya (halo
+  merah tua di huruf merah) → graf batas (simpul = titik temu 3+ area, naik/turun bingkai gambar; rantai
+  bingkai = garis lurus persis) → per rantai: titik tengah tepi, haluskan ringan, poligon optimal
+  (Selinger/Potrace, ditulis ulang; tol 0,4+0,05×skala), `straighten` (sisi panjang ≥ 8×skala yang riak
+  ≤ 0,55×skala+0,4 diluruskan — tepi diagonal bergerigi dari sumber), simpul digeser ke perpotongan garis
+  kuadrat-terkecil (≤ 0,75 px), `collapseChamfers` (1–3 sisi pendek di sudut membulat → satu sudut),
+  potongan ala potrace (alphamax 0,9 + belokan ≥ 40° = sudut) → `mergePieces` (fit ulang Schneider).
+  Path per warna (urut luas total, terbesar paling bawah, fill nonzero); bentuk bawah memakai versi
+  rantai yang digeser ≤ 1 px ke bentuk atas (anti garis rambut). Uji cepat tanpa browser:
+  `node --experimental-strip-types` + `traceContoursToSvg` pada RGBA mentah.
 - `src/lib/vtracerOptions.ts` — `layerDifference: 2` WAJIB: bawaan vtracer (16) menggabungkan nuansa
   gelap yang sudah dipisah palet (ban hitam ↔ fender abu).
 - `src/lib/gradientSvg.ts` — `<defs>` gradien kanonik (`userSpaceOnUse` + `gradientTransform=matrix`),

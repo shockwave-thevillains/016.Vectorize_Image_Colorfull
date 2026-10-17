@@ -63,6 +63,8 @@ export interface VectorizeConfig {
   epsGradientMode?: EpsGradientMode; // 'shading' (Level 3, default) | 'bands' (pita warna, Level 2)
   // Curve fitting & tracing geometry
   curveStyle: 'spline' | 'polygon'; // "Organik" (spline) vs "Geometris" (polygon)
+  // Tracer lapisan datar: 'contour' (bawaan; kontur bersama, satu kurva per batas) | 'vtracer' (per lapisan warna)
+  tracer?: 'vtracer' | 'contour';
   mode: 'spline' | 'polygon';
   hierarchical: 'stacked' | 'cutout';
   filterSpeckle: number; // Speckle noise suppression in pixels (default 8-16)

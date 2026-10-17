@@ -722,6 +722,18 @@ export const VectorPreviewModal: React.FC<VectorPreviewModalProps> = ({
               )}
 
               <div className="flex items-center gap-1.5 bg-white border border-slate-200 px-2.5 py-1 rounded-lg">
+                <span className="font-semibold text-slate-700">Tracer:</span>
+                <select
+                  value={modalConfig.tracer ?? 'contour'}
+                  onChange={(e) => setModalConfig({ ...modalConfig, tracer: e.target.value as 'contour' | 'vtracer' })}
+                  className="bg-transparent text-indigo-700 font-bold focus:outline-none cursor-pointer"
+                >
+                  <option value="contour">Kontur Bersama</option>
+                  <option value="vtracer">vtracer</option>
+                </select>
+              </div>
+
+              <div className="flex items-center gap-1.5 bg-white border border-slate-200 px-2.5 py-1 rounded-lg">
                 <span className="font-semibold text-slate-700">Bentuk:</span>
                 <select
                   value={(modalConfig.curveStyle || modalConfig.mode) === 'polygon' ? 'polygon' : 'spline'}
