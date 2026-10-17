@@ -17,6 +17,7 @@ import {
   mergeThinRims,
   unifyGlyphColors,
   widenThinStrokes,
+  regularizeBarcodes,
   buildPaletteIndexMap,
   recolorSvgByVisibility,
   optimizeAndMergeSvg,
@@ -667,6 +668,7 @@ export function loadImageToCanvas(
         unifyGlyphColors(workingImageData, effectiveScale, preSnap);
         if (config.smoothEdges !== false) majorityFilter(workingImageData, 2);
         widenThinStrokes(workingImageData, preSnap, effectiveScale);
+        regularizeBarcodes(workingImageData, preSnap, effectiveScale);
         rawColorCount = dominantPalette.rawColorCount;
         mergedColorCount = dominantPalette.mergedColorCount;
         snappedPalette = dominantPalette.map((c) => c.hex);

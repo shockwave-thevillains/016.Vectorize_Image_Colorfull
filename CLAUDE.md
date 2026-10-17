@@ -67,7 +67,11 @@ npm run build   # wajib lolos sebelum commit
   warna INTI huruf, piksel ≥ rata-rata komponen, dengan penalti rona), `majorityFilter`
   3×3 (smoothEdges; goresan 1 px kontras dilindungi), lalu `widenThinStrokes`: goresan 1–2 px kontras
   dipertebal jadi 3 px karena vtracer membuang bentuk ≤ 2 px (huruf "I" hilang) — hanya bila warnanya
-  juga ada sebagai bidang tebal di dekatnya dan kedua sisinya latar yang sama.
+  juga ada sebagai bidang tebal di dekatnya dan kedua sisinya latar yang sama. Terakhir
+  `regularizeBarcodes`: blok banyak tepi mendatar tanpa tepi tegak, tiap baris berpola kolom sama
+  (korelasi ≥ 0.85, tinggi ≥ 10 px sumber, ≥ 6 batang) digambar ulang per kolom (Otsu kecerahan asli):
+  batang = satu warna (Lab terdekat ke ¼ teratas kecerahan batang, rona ×2), celah = warna/transparan
+  terbanyak, batang min 3 px. Huruf miring ("W") tidak lolos uji korelasi.
   Gradasi: `minAreaFraction` 0.0002, `maxRegions` 160 (garis miring "%" dsb. ikut terdeteksi).
   Palet TETAP diserahkan ke vtracer (tanpa palet vtracer menggabungkan klaster mirip: bingkai kaca teal
   truk tertelan kabin abu). Warna rata-rata klaster yang dipetakan vtracer bisa salah (huruf perak →

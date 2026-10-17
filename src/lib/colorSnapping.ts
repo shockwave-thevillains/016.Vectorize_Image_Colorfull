@@ -1469,3 +1469,209 @@ function splitShapes(d: string): string[] {
   if (groups.size < 2) return [d];
   return [...groups.values()].map((g) => g.join(''));
 }
+
+/**
+ * Barcode / garis-garis tegak sejajar. Batang 1–3 px sumber dengan tepi buram ter-snap menjadi mosaik
+ * beberapa warna (emas, abu, gelap, transparan) sehingga hasil vektor bergerigi dan batang menyatu.
+ * Deteksi: blok dengan banyak tepi mendatar tetapi hampir tanpa tepi tegak. Pola batang dibaca per
+ * KOLOM dari warna asli (ambang Otsu kecerahan kolom), lalu blok digambar ulang: kolom batang = satu
+ * warna batang, kolom celah = warna/transparansi celah terbanyak. Batang dipertebal minimal 3 px agar
+ * tidak dibuang vtracer. Teks tidak terkena karena hurufnya punya banyak tepi tegak.
+ */
+export function regularizeBarcodes(imageData: ImageData, original: Uint8ClampedArray, scale: number): void {
+  const { width: w, height: h, data } = imageData;
+  const total = w * h;
+  const L = new Float32Array(total);
+  for (let i = 0; i < total; i++) {
+    const j = i * 4;
+    L[i] = 0.299 * original[j] + 0.587 * original[j + 1] + 0.114 * original[j + 2];
+  }
+  const s = Math.max(1, scale);
+  const EDGE = 45;
+  // integral image dari tepi mendatar (perubahan kiri↔kanan) dan tegak
+  const W1 = w + 1;
+  const IH = new Int32Array(W1 * (h + 1)), IV = new Int32Array(W1 * (h + 1));
+  for (let y = 0; y < h; y++) {
+    let rh = 0, rv = 0;
+    for (let x = 0; x < w; x++) {
+      const p = y * w + x;
+      if (x > 0 && x + 1 < w && Math.abs(L[p + 1] - L[p - 1]) > EDGE) rh++;
+      if (y > 0 && y + 1 < h && Math.abs(L[p + w] - L[p - w]) > EDGE) rv++;
+      IH[(y + 1) * W1 + x + 1] = IH[y * W1 + x + 1] + rh;
+      IV[(y + 1) * W1 + x + 1] = IV[y * W1 + x + 1] + rv;
+    }
+  }
+  const box = (I: Int32Array, x0: number, y0: number, x1: number, y1: number) =>
+    I[y1 * W1 + x1] - I[y0 * W1 + x1] - I[y1 * W1 + x0] + I[y0 * W1 + x0];
+  const hw = Math.round(6 * s), hh = Math.round(4 * s);
+  const mark = new Uint8Array(total);
+  let anyMark = false;
+  for (let y = hh; y < h - hh; y += 2) {
+    for (let x = hw; x < w - hw; x += 2) {
+      const x0 = x - hw, x1 = x + hw + 1, y0 = y - hh, y1 = y + hh + 1;
+      const area = (x1 - x0) * (y1 - y0);
+      const ch = box(IH, x0, y0, x1, y1), cv = box(IV, x0, y0, x1, y1);
+      if (ch >= area * 0.2 && cv <= ch * 0.12) {
+        for (let dy = 0; dy < 2 && y + dy < h; dy++) for (let dx = 0; dx < 2 && x + dx < w; dx++) mark[(y + dy) * w + x + dx] = 1;
+        anyMark = true;
+      }
+    }
+  }
+  if (!anyMark) return;
+  // komponen blok
+  const seen = new Uint8Array(total);
+  const stack = new Int32Array(total);
+  const blocks: Array<[number, number, number, number]> = [];
+  for (let s0 = 0; s0 < total; s0++) {
+    if (!mark[s0] || seen[s0]) continue;
+    let sp = 0, bx0 = w, by0 = h, bx1 = -1, by1 = -1;
+    stack[sp++] = s0;
+    seen[s0] = 1;
+    while (sp > 0) {
+      const p = stack[--sp];
+      const x = p % w, y = (p / w) | 0;
+      if (x < bx0) bx0 = x;
+      if (x > bx1) bx1 = x;
+      if (y < by0) by0 = y;
+      if (y > by1) by1 = y;
+      for (const q of [x > 0 ? p - 1 : -1, x + 1 < w ? p + 1 : -1, y > 0 ? p - w : -1, y + 1 < h ? p + w : -1]) {
+        if (q >= 0 && mark[q] && !seen[q]) { seen[q] = 1; stack[sp++] = q; }
+      }
+    }
+    if (bx1 - bx0 >= 12 * s && by1 - by0 >= 3 * s) blocks.push([bx0, by0, bx1, by1]);
+  }
+  const keyOf = (j: number) => (data[j + 3] < 30 ? -1 : (data[j] << 16) | (data[j + 1] << 8) | data[j + 2]);
+  let keysCache: number[] | null = null;
+  const imageKeys = (): number[] => {
+    if (keysCache) return keysCache;
+    const cnt = new Map<number, number>();
+    for (let i = 0; i < total; i++) {
+      const k = keyOf(i * 4);
+      if (k !== -1) cnt.set(k, (cnt.get(k) ?? 0) + 1);
+    }
+    keysCache = [...cnt].filter(([, n]) => n >= 200).map(([k]) => k);
+    return keysCache;
+  };
+  for (const [mx0, my0, mx1, my1] of blocks) {
+    // perluas ke lebar/tinggi blok sebenarnya (jendela deteksi memangkas tepi)
+    const x0 = Math.max(1, mx0 - hw), x1 = Math.min(w - 2, mx1 + hw);
+    const cy0 = my0, cy1 = my1;
+    const nx = x1 - x0 + 1;
+    const prof = new Float32Array(nx);
+    for (let x = 0; x < nx; x++) {
+      let sum = 0;
+      for (let y = cy0; y <= cy1; y++) sum += L[y * w + x0 + x];
+      prof[x] = sum / (cy1 - cy0 + 1);
+    }
+    let pm = 0;
+    for (let x = 0; x < nx; x++) pm += prof[x];
+    pm /= nx;
+    let pv = 0;
+    for (let x = 0; x < nx; x++) pv += (prof[x] - pm) ** 2;
+    if (pv <= 0) continue;
+    const rowCorr = (y: number) => {
+      let rm = 0;
+      for (let x = 0; x < nx; x++) rm += L[y * w + x0 + x];
+      rm /= nx;
+      let cov = 0, rv = 0;
+      for (let x = 0; x < nx; x++) {
+        const d = L[y * w + x0 + x] - rm;
+        cov += d * (prof[x] - pm);
+        rv += d * d;
+      }
+      return rv > 0 ? cov / Math.sqrt(rv * pv) : 0;
+    };
+    // batang harus benar-benar tegak: setiap baris inti memperlihatkan pola kolom yang sama
+    // (goresan miring huruf "W"/"V" tidak lolos)
+    let corrSum = 0;
+    for (let y = cy0; y <= cy1; y++) corrSum += rowCorr(y);
+    if (corrSum / (cy1 - cy0 + 1) < 0.85) continue;
+    let y0 = cy0, y1 = cy1;
+    while (y0 > 0 && rowCorr(y0 - 1) > 0.75) y0--;
+    while (y1 < h - 1 && rowCorr(y1 + 1) > 0.75) y1++;
+    if (y1 - y0 < 10 * s) continue; // barcode: batang cukup tinggi (huruf teks kecil lebih pendek)
+    // ambang Otsu kecerahan kolom
+    let lo = Infinity, hi = -Infinity;
+    for (let x = 0; x < nx; x++) { if (prof[x] < lo) lo = prof[x]; if (prof[x] > hi) hi = prof[x]; }
+    if (hi - lo < 60) continue;
+    let bestT = (lo + hi) / 2, bestVar = -1;
+    for (let t = lo + 2; t < hi - 2; t += 2) {
+      let n0 = 0, s0 = 0, n1 = 0, s1 = 0;
+      for (let x = 0; x < nx; x++) { if (prof[x] < t) { n0++; s0 += prof[x]; } else { n1++; s1 += prof[x]; } }
+      if (!n0 || !n1) continue;
+      const v = n0 * n1 * (s0 / n0 - s1 / n1) ** 2;
+      if (v > bestVar) { bestVar = v; bestT = t; }
+    }
+    const isBar = new Uint8Array(nx);
+    for (let x = 0; x < nx; x++) isBar[x] = prof[x] >= bestT ? 1 : 0;
+    // buang kolom celah di ujung blok
+    let a = 0, b = nx - 1;
+    while (a < nx && !isBar[a]) a++;
+    while (b >= 0 && !isBar[b]) b--;
+    if (b - a < 10 * s) continue;
+    let runs = 0;
+    for (let x = a; x <= b; x++) if (isBar[x] && (x === a || !isBar[x - 1])) runs++;
+    if (runs < 6) continue;
+    // warna batang & celah = warna hasil snapping terbanyak di kolomnya (inti blok)
+    const barCount = new Map<number, number>(), gapCount = new Map<number, number>();
+    for (let y = y0; y <= y1; y++) {
+      for (let x = a; x <= b; x++) {
+        const k = keyOf((y * w + x0 + x) * 4);
+        const m = isBar[x] ? barCount : gapCount;
+        m.set(k, (m.get(k) ?? 0) + 1);
+      }
+    }
+    // warna batang: warna gambar terdekat dengan warna ASLI bagian TERANG batang (seperempat teratas
+    // kecerahan; tepi buram & bayangan tidak ikut), dipilih dari semua warna yang dipakai gambar
+    const brightVals: number[] = [];
+    for (let y = y0; y <= y1; y++) for (let x = a; x <= b; x++) if (isBar[x]) brightVals.push(L[y * w + x0 + x]);
+    brightVals.sort((p, q) => p - q);
+    const lMed = brightVals.length ? brightVals[Math.floor(brightVals.length * 0.75)] : bestT;
+    let mr = 0, mg = 0, mb = 0, mn = 0;
+    for (let y = y0; y <= y1; y++) {
+      for (let x = a; x <= b; x++) {
+        const p = y * w + x0 + x;
+        if (!isBar[x] || L[p] < lMed) continue;
+        mr += original[p * 4]; mg += original[p * 4 + 1]; mb += original[p * 4 + 2]; mn++;
+      }
+    }
+    let barK = -1, bd = Infinity, gapK = -1, gn = -1;
+    if (mn > 0) {
+      mr /= mn; mg /= mn; mb /= mn;
+      const ml = rgbToLab(mr, mg, mb);
+      for (const k of imageKeys()) {
+        const kl = rgbToLab((k >> 16) & 255, (k >> 8) & 255, k & 255);
+        // rona (a*, b*) diberi bobot dua kali: batang emas tetap emas, bukan krem keabuan
+        const d = (kl[0] - ml[0]) ** 2 + 4 * ((kl[1] - ml[1]) ** 2 + (kl[2] - ml[2]) ** 2);
+        if (d < bd) { bd = d; barK = k; }
+      }
+    }
+    for (const [k, n] of gapCount) if (n > gn) { gn = n; gapK = k; }
+    if (barK === -1) continue;
+    // batang minimal 3 px
+    const minBar = Math.max(3, Math.round(1.2 * s));
+    const bar2 = Uint8Array.from(isBar);
+    for (let x = a; x <= b; x++) {
+      if (!isBar[x] || (x > a && isBar[x - 1])) continue;
+      let e = x;
+      while (e + 1 <= b && isBar[e + 1]) e++;
+      const len = e - x + 1;
+      if (len < minBar) {
+        const extra = minBar - len;
+        const l = Math.max(a, x - (extra >> 1)), r = Math.min(b, l + minBar - 1);
+        for (let k = l; k <= r; k++) bar2[k] = 1;
+      }
+    }
+    for (let y = y0; y <= y1; y++) {
+      for (let x = a; x <= b; x++) {
+        const j = (y * w + x0 + x) * 4;
+        const k = bar2[x] ? barK : gapK;
+        if (k === -1) { data[j + 3] = 0; continue; }
+        data[j] = (k >> 16) & 255;
+        data[j + 1] = (k >> 8) & 255;
+        data[j + 2] = k & 255;
+        data[j + 3] = 255;
+      }
+    }
+  }
+}
